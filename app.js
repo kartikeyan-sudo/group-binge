@@ -54,6 +54,9 @@ navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream =>
   if (myVideo) {
     myVideo.srcObject = stream;
     myVideo.muted = true;
+    myVideo.autoplay = true;
+    myVideo.playsInline = true;
+    myVideo.style.display = 'block';
     myVideo.play().catch(() => {});
   }
   console.log("Local video stream acquired");
@@ -219,18 +222,28 @@ function joinRoom(roomRef, initiator) {
   peer.on('connect', () => {
     setStatus('P2P Connected!');
     connected = true;
-    if (peerCard) peerCard.style.display = '';
+    if (peerCard) peerCard.style.display = 'block';
     console.log("P2P connection established.");
   });
 
   peer.on('stream', stream => {
     console.log("Peer video stream received", stream);
-    if (peerVideo) {
-      peerVideo.srcObject = stream;
-      peerVideo.play().catch(()=>{});
-      peerCard.style.display = '';
-    } else {
-      alert("peerVideo element missing!");
+    try {
+      if (peerVideo) {
+        peerVideo.srcObject = null; // force refresh
+        peerVideo.srcObject = stream;
+        peerVideo.autoplay = true;
+        peerVideo.playsInline = true;
+        peerVideo.muted = false;
+        peerVideo.style.display = 'block';
+        peerCard.style.display = 'block';
+        setTimeout(() => peerVideo.play().catch(()=>{}), 200);
+        console.log("Peer video element updated and displayed");
+      } else {
+        alert("peerVideo element missing!");
+      }
+    } catch(e) {
+      console.error("Error setting peer video srcObject:", e);
     }
   });
 
