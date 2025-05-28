@@ -39,8 +39,11 @@ let hasInitializedStream = false;
 // New sync control variables with modified values for better performance
 let lastSyncTime = 0; // Track when we last performed a sync
 let ignoreNextStateChange = false; // Flag to ignore state changes caused by our own sync
-const SYNC_COOLDOWN = 8000; // Minimum time between syncs (increased to 8 seconds)
-const TIME_SYNC_THRESHOLD = 3; // Only sync if time difference is greater than this (seconds) - reduced from 50 to 3
+const SYNC_COOLDOWN = 10000; // Minimum time between syncs (increased to 10 seconds)
+const TIME_SYNC_THRESHOLD = 5; // Only sync if time difference is greater than this (seconds) - using 5 seconds instead of 3
+let lastRemoteTime = 0; // Track the last remote time to detect loops
+let consecutiveSyncCount = 0; // Track how many times we've synced to similar positions
+const MAX_CONSECUTIVE_SYNCS = 3; // Maximum number of consecutive syncs before we temporarily disable syncing
 
 // DOM Elements
 const splashScreen = document.getElementById('splashScreen');
@@ -625,6 +628,9 @@ function onPlayerReady(event) {
             
             // Update the video ID input field
             videoIdInput.value = videoState.videoId;
+            
+            // Initialize lastRemoteTime to avoid immediate sync issues
+            lastRemoteTime = videoState.currentTime;
         }
     });
     
@@ -632,7 +638,7 @@ function onPlayerReady(event) {
     setInterval(updateSeekBar, 1000);
     
     // Add a single consolidated sync checker with rate limiting
-    setInterval(checkForSyncNeeded, 3000);
+    setInterval(checkForSyncNeeded, 5000); // Increased from 3000 to 5000ms
 }
 
 // IMPROVED: Enhanced sync check function to better handle synchronization issues
@@ -655,29 +661,61 @@ function checkForSyncNeeded() {
             const localIsPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
             const timeDiff = Math.abs(localTime - remoteState.currentTime);
             
+            // Check if we're in a sync loop by comparing with the last remote time
+            const remoteTimeDiff = Math.abs(remoteState.currentTime - lastRemoteTime);
+            if (remoteTimeDiff < 2) {
+                // The remote time is very similar to the last one we synced to
+                consecutiveSyncCount++;
+                debugLog(`Detected potential sync loop. Count: ${consecutiveSyncCount}`);
+                
+                if (consecutiveSyncCount >= MAX_CONSECUTIVE_SYNCS) {
+                    // We've synced to similar positions multiple times, this might be a loop
+                    debugLog(`Possible sync loop detected! Skipping this sync.`);
+                    // Reset the count after a while to allow future syncs
+                    setTimeout(() => { consecutiveSyncCount = 0; }, 30000);
+                    return;
+                }
+            } else {
+                // Remote time is different, reset the counter
+                consecutiveSyncCount = 0;
+            }
+            
             let needsSync = false;
             let syncReason = '';
             
-            // Check if we need to sync playback state (playing/paused)
+            // First check play state - most important
             if (remoteState.isPlaying !== localIsPlaying) {
                 needsSync = true;
                 syncReason = `Play state mismatch: Remote=${remoteState.isPlaying}, Local=${localIsPlaying}`;
             }
             
-            // Only sync time if difference is significant
-            else if (timeDiff > TIME_SYNC_THRESHOLD) {
+            // Then check time if both are playing or if time difference is very large
+            else if (timeDiff > TIME_SYNC_THRESHOLD && 
+                     (remoteState.isPlaying && localIsPlaying || timeDiff > 30)) {
+                
                 const duration = youtubePlayer.getDuration();
                 
-                // Prevent sync loops by checking if we're in a reasonable playback position
-                if (localTime > 0 && localTime < duration && 
-                    remoteState.currentTime > 0 && remoteState.currentTime < duration) {
+                // Enhanced check to prevent sync loops:
+                // 1. Verify we're not at video boundaries
+                // 2. Make sure both times are reasonable
+                // 3. Ensure we're not constantly syncing to nearly the same position
+                if (localTime > 1 && localTime < duration - 1 && 
+                    remoteState.currentTime > 1 && remoteState.currentTime < duration - 1) {
+                    
                     needsSync = true;
                     syncReason = `Time difference: ${timeDiff.toFixed(2)}s (Local: ${localTime.toFixed(2)}, Remote: ${remoteState.currentTime.toFixed(2)})`;
+                    
+                    // When times are dramatically different, log it
+                    if (timeDiff > 30) {
+                        debugLog(`Large time difference detected: ${timeDiff.toFixed(2)}s`);
+                    }
                 }
             }
             
             if (needsSync) {
                 debugLog(`Sync needed: ${syncReason}`);
+                // Store the remote time before syncing to check for loops next time
+                lastRemoteTime = remoteState.currentTime;
                 performSync(remoteState);
             }
         });
@@ -692,36 +730,46 @@ function performSync(remoteState) {
     isSyncingVideo = true;
     ignoreNextStateChange = true;
     
-    // First sync the time if needed
+    debugLog(`Performing sync to time ${remoteState.currentTime.toFixed(2)}, playing=${remoteState.isPlaying}`);
+    
+    // First sync the time if needed but only if the difference is significant
     const timeDiff = Math.abs(youtubePlayer.getCurrentTime() - remoteState.currentTime);
     if (timeDiff > TIME_SYNC_THRESHOLD) {
         youtubePlayer.seekTo(remoteState.currentTime, true);
+        
+        // Add a small delay before changing play state to allow the seek to complete
+        setTimeout(() => {
+            // Then sync the play state
+            if (remoteState.isPlaying && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                youtubePlayer.playVideo();
+            } else if (!remoteState.isPlaying && youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING) {
+                youtubePlayer.pauseVideo();
+            }
+        }, 500);
+    } else {
+        // Just sync the play state if time is close enough
+        if (remoteState.isPlaying && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+            youtubePlayer.playVideo();
+        } else if (!remoteState.isPlaying && youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING) {
+            youtubePlayer.pauseVideo();
+        }
     }
     
-    // Then sync the play state
-    if (remoteState.isPlaying && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
-        youtubePlayer.playVideo();
-    } else if (!remoteState.isPlaying && youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING) {
-        youtubePlayer.pauseVideo();
-    }
-    
-    // Reset sync flags after a longer delay to ensure state changes have completed
+    // Reset sync flags after sufficient delays
     setTimeout(() => {
         isSyncingVideo = false;
-    }, 1500);
+    }, 2000);
     
-    // Reset ignoreNextStateChange after even longer to catch any delayed events
     setTimeout(() => {
         ignoreNextStateChange = false;
-    }, 2000);
+    }, 2500);
 }
 
 function onPlayerStateChange(event) {
     // Don't process if this state change was triggered by our own sync
     if (ignoreNextStateChange) {
         debugLog('Ignoring state change caused by sync');
-        ignoreNextStateChange = false;
-        return;
+        return;  // Don't reset the flag here to allow multiple state changes during sync
     }
     
     // Don't update if a sync was performed too recently
@@ -777,6 +825,10 @@ function loadVideo() {
     // Show loading notification
     showNotification('Loading video...', 'info', 2000);
     
+    // Reset sync indicators when loading a new video
+    lastRemoteTime = 0; 
+    consecutiveSyncCount = 0;
+    
     // Set flags to prevent sync loops
     ignoreNextStateChange = true;
     lastSyncTime = Date.now();
@@ -813,7 +865,7 @@ function loadVideo() {
     setTimeout(() => {
         isSyncingVideo = false;
         ignoreNextStateChange = false;
-    }, 2000); // Extended from 1000 to 2000ms to allow for YouTube API delays
+    }, 3000); // Extended delay for new video loading
 }
 
 function playVideo() {
@@ -843,13 +895,17 @@ function handleSeek() {
     ignoreNextStateChange = true;
     lastSyncTime = Date.now();
     
+    // Reset loop detection when user manually seeks
+    lastRemoteTime = newTime;
+    consecutiveSyncCount = 0;
+    
     // Perform the seek
     youtubePlayer.seekTo(newTime, true);
     
     // Wait a bit to update Firebase to make sure the seekTo has completed
     setTimeout(() => {
         updateVideoState(youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING, newTime);
-    }, 300); // Increased from 200 to 300ms for better stability
+    }, 300);
 }
 
 function updateSeekBar() {
@@ -893,10 +949,10 @@ function updateVideoState(isPlaying, currentTime) {
     // Reset the sync flag after a delay
     setTimeout(() => {
         isSyncingVideo = false;
-    }, 1500); // Increased from 1000 to 1500ms for better stability
+    }, 2000);
 }
 
-// Force sync button implementation
+// Force sync button implementation with enhanced logic
 function forceSyncWithRemote() {
     db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
         const remoteState = snapshot.val();
@@ -904,6 +960,10 @@ function forceSyncWithRemote() {
         
         debugLog('Manual sync requested');
         showNotification('Synchronizing with room...', 'info');
+        
+        // Reset loop detection counters on manual sync
+        lastRemoteTime = remoteState.currentTime;
+        consecutiveSyncCount = 0;
         
         performSync(remoteState);
         showNotification('Synchronized with room', 'success', 2000);
