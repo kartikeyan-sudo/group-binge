@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Watch Together: Simple P2P YouTube Sync</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #222; color: #eee; }
+    #videos { display: flex; justify-content: center; gap: 10px; }
+    video { width: 200px; background: #000; border-radius: 8px; }
+    #ytplayer { margin: 20px auto; }
+    .input-row { margin: 8px; }
+    input { padding: 3px 6px; }
+    button { padding: 4px 10px; }
+    #status { color: #6ef37e; }
+  </style>
+</head>
+<body>
+  <h1>Watch Together (P2P, YouTube Sync, No Backend)</h1>
+  <div class="input-row">
+    <label>Your Peer ID: <input id="myid" readonly></label>
+    <button onclick="copyID()">Copy</button>
+  </div>
+  <div class="input-row">
+    <label>Room/Peer ID to Connect: <input id="peerid"></label>
+    <button onclick="connectPeer()">Connect</button>
+  </div>
+  <div class="input-row">
+    <label>YouTube Link: <input id="ytlink"></label>
+    <button onclick="setYT()">Set Video</button>
+  </div>
+  <div id="status">Status: Not connected</div>
+  <div id="videos">
+    <div>
+      <div>You</div>
+      <video id="myvideo" autoplay playsinline muted></video>
+    </div>
+    <div>
+      <div>Peer</div>
+      <video id="peervideo" autoplay playsinline></video>
+    </div>
+  </div>
+  <div id="ytplayer"></div>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script>
+    // --- WebRTC video call ---
+    let peer = new Peer(); // random ID
+    let conn, call;
+    let localStream;
+    let ytPlayer, isYTReady = false;
+
+    peer.on('open', id => {
+      document.getElementById('myid').value = id;
+    });
+
+    // Get local camera
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then(stream => {
+        localStream = stream;
+        document.getElementById('myvideo').srcObject = stream;
+      });
+
+    // Handle incoming data connection
+    peer.on('connection', c => {
+      conn = c;
+      setupConn();
+    });
+
+    // Handle incoming call (video)
+    peer.on('call', incomingCall => {
+      incomingCall.answer(localStream);
+      incomingCall.on('stream', stream => {
+        document.getElementById('peervideo').srcObject = stream;
+      });
+      call = incomingCall;
+      setStatus('Connected! (incoming)');
+    });
+
+    // Connect to another peer
+    function connectPeer() {
+      let otherId = document.getElementById('peerid').value.trim();
+      if (!otherId) return alert('Enter a Peer ID to connect.');
+      conn = peer.connect(otherId);
+      setupConn();
+      // Call for video
+      call = peer.call(otherId, localStream);
+      call.on('stream', stream => {
+        document.getElementById('peervideo').srcObject = stream;
+      });
+      setStatus('Connected! (outgoing)');
+    }
+
+    // Setup data connection for sync/YouTube
+    function setupConn() {
+      if (!conn) return;
+      conn.on('data', msg => {
+        if (msg.type === 'yt') {
+          loadYT(msg.videoId);
+        }
+        if (msg.type === 'yt-control' && isYTReady) {
+          if (msg.action === 'play') ytPlayer.playVideo();
+          if (msg.action === 'pause') ytPlayer.pauseVideo();
+          if (msg.action === 'seek') ytPlayer.seekTo(msg.time, true);
+        }
+      });
+    }
+
+    // --- YouTube Player ---
+    // Load YouTube IFrame API
+    let tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.body.appendChild(tag);
+
+    function onYouTubeIframeAPIReady() {
+      ytPlayer = new YT.Player('ytplayer', {
+        height: '360', width: '640', videoId: '',
+        events: {
+          'onReady': () => { isYTReady = true; },
+          'onStateChange': onYTState
+        }
+      });
+    }
+
+    // Set YouTube video
+    function setYT() {
+      let url = document.getElementById('ytlink').value.trim();
+      let videoId = parseYT(url);
+      if (!videoId) return alert('Invalid YouTube Link!');
+      loadYT(videoId);
+      if (conn && conn.open) conn.send({type: 'yt', videoId});
+    }
+
+    // Parse YouTube link to video ID
+    function parseYT(url) {
+      let match = url.match(/(?:youtu\.be\/|youtube\.com.*(?:v=|\/embed\/|\/shorts\/))([\w-]{11})/);
+      return match ? match[1] : null;
+    }
+
+    // Load YT video by ID
+    function loadYT(videoId) {
+      if (isYTReady) ytPlayer.loadVideoById(videoId);
+      else {
+        // Wait for player to be ready
+        let intv = setInterval(() => {
+          if (isYTReady) {
+            ytPlayer.loadVideoById(videoId);
+            clearInterval(intv);
+          }
+        }, 300);
+      }
+    }
+
+    // Sync control (play/pause/seek)
+    let lastActionTime = 0;
+    function onYTState(event) {
+      if (!conn || !conn.open) return;
+      // 1=play, 2=pause
+      let action = event.data === 1 ? 'play' : event.data === 2 ? 'pause' : null;
+      if (action) {
+        let now = Date.now();
+        if (now - lastActionTime < 500) return; // debounce
+        conn.send({type: 'yt-control', action});
+        lastActionTime = now;
+      }
+      // Seek
+      if (event.data === 1 || event.data === 2) {
+        ytPlayer.getCurrentTimeAsync?.().then(time => {
+          conn.send({type: 'yt-control', action: 'seek', time});
+        });
+      }
+    }
+
+    // Manual seek (detect and send)
+    setInterval(() => {
+      if (!ytPlayer || !isYTReady) return;
+      let curTime = ytPlayer.getCurrentTime();
+      // You can add custom logic to detect manual seeking and sync.
+      // For demo, skip frequent sync.
+    }, 1000);
+
+    // Helpers
+    function setStatus(msg) {
+      document.getElementById('status').textContent = 'Status: ' + msg;
+    }
+    function copyID() {
+      navigator.clipboard.writeText(document.getElementById('myid').value);
+    }
+  </script>
+</body>
+</html>
