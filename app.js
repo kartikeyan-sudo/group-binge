@@ -187,6 +187,39 @@ function showNotification(message, type = 'info', duration = 3000) {
     }, duration);
 }
 
+// Add this function to help with debugging
+function logMediaState() {
+    debugLog("Media State Debug:");
+    
+    // Log local stream status
+    debugLog(`- Local stream exists: ${localStream !== null}`);
+    if (localStream) {
+        debugLog(`- Local video tracks: ${localStream.getVideoTracks().length}`);
+        debugLog(`- Local audio tracks: ${localStream.getAudioTracks().length}`);
+        
+        const videoTrack = localStream.getVideoTracks()[0];
+        if (videoTrack) {
+            debugLog(`- Video track enabled: ${videoTrack.enabled}`);
+            debugLog(`- Video track settings: ${JSON.stringify(videoTrack.getSettings())}`);
+        }
+    }
+    
+    // Log peer connections
+    debugLog(`- Peer connections count: ${Object.keys(peers).length}`);
+    Object.keys(peers).forEach(peerId => {
+        const peerConnected = peers[peerId] && peers[peerId]._connected;
+        debugLog(`  > Peer ${peerId}: ${peerConnected ? 'Connected' : 'Not connected'}`);
+    });
+    
+    // Check video elements
+    const videoElements = document.querySelectorAll('video');
+    debugLog(`- Video elements on page: ${videoElements.length}`);
+    videoElements.forEach((video, i) => {
+        const hasSource = video.srcObject !== null;
+        debugLog(`  > Video ${i} (${video.id}): Has source: ${hasSource}, Size: ${video.videoWidth}x${video.videoHeight}`);
+    });
+}
+
 // ----- Room Management -----
 function createRoom() {
     console.log('Create room button clicked'); // Debug logging
@@ -229,6 +262,9 @@ function createRoom() {
         // Initialize media after UI transition
         initializeUserMedia()
             .then(() => {
+                // Log media state for debugging
+                logMediaState();
+                
                 // Continue with room setup
                 setupFirebaseListeners();
                 setTimeout(() => {
@@ -300,6 +336,9 @@ function joinRoom() {
             // Initialize media after UI transition
             initializeUserMedia()
                 .then(() => {
+                    // Log media state for debugging
+                    logMediaState();
+                    
                     // Continue with room setup
                     setupFirebaseListeners();
                     setTimeout(() => {
@@ -690,15 +729,43 @@ function leaveRoom() {
 async function initializeUserMedia() {
     try {
         debugLog('Requesting user media access');
-        // Request camera and microphone access
-        localStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { 
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                facingMode: "user"
-            }, 
-            audio: true
-        });
+        try {
+            // Try high quality first
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    width: { ideal: 640 },
+                    height: { ideal: 480 },
+                    facingMode: "user"
+                }, 
+                audio: true
+            });
+        } catch (highQualityError) {
+            debugLog('Failed to get high quality video, trying lower quality');
+            try {
+                // Fall back to lower quality
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 320 },
+                        height: { ideal: 240 }
+                    }, 
+                    audio: true
+                });
+            } catch (lowQualityError) {
+                debugLog('Failed to get lower quality video, trying audio only');
+                try {
+                    // Last resort - audio only
+                    localStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: false, 
+                        audio: true
+                    });
+                    
+                    // Update video state since we only have audio
+                    currentUser.isVideoEnabled = false;
+                } catch (audioOnlyError) {
+                    throw highQualityError; // Throw the original error
+                }
+            }
+        }
         
         debugLog('User media access granted');
         
@@ -706,9 +773,15 @@ async function initializeUserMedia() {
         localVideo.srcObject = localStream;
         hasInitializedStream = true;
         
-        // Set initial states
-        currentUser.isAudioEnabled = true;
-        currentUser.isVideoEnabled = true;
+        // Set initial states based on what tracks we actually got
+        currentUser.isAudioEnabled = localStream.getAudioTracks().length > 0;
+        currentUser.isVideoEnabled = localStream.getVideoTracks().length > 0;
+        
+        // Update UI to reflect actual state
+        if (!currentUser.isVideoEnabled) {
+            toggleVideoBtn.innerHTML = '<i class="fas fa-video-slash"></i>';
+            toggleVideoBtn.classList.add('muted');
+        }
         
         return true;
     } catch (error) {
@@ -722,10 +795,13 @@ function toggleAudio() {
     
     currentUser.isAudioEnabled = !currentUser.isAudioEnabled;
     
-    // Update local audio tracks
-    localStream.getAudioTracks().forEach(track => {
-        track.enabled = currentUser.isAudioEnabled;
-    });
+    // Update local audio tracks if they exist
+    const audioTracks = localStream.getAudioTracks();
+    if (audioTracks.length > 0) {
+        audioTracks.forEach(track => {
+            track.enabled = currentUser.isAudioEnabled;
+        });
+    }
     
     // Update UI
     toggleAudioBtn.innerHTML = currentUser.isAudioEnabled ? 
@@ -747,10 +823,13 @@ function toggleVideo() {
     
     currentUser.isVideoEnabled = !currentUser.isVideoEnabled;
     
-    // Update local video tracks
-    localStream.getVideoTracks().forEach(track => {
-        track.enabled = currentUser.isVideoEnabled;
-    });
+    // Update local video tracks if they exist
+    const videoTracks = localStream.getVideoTracks();
+    if (videoTracks.length > 0) {
+        videoTracks.forEach(track => {
+            track.enabled = currentUser.isVideoEnabled;
+        });
+    }
     
     // Update UI
     toggleVideoBtn.innerHTML = currentUser.isVideoEnabled ? 
@@ -1451,8 +1530,8 @@ function createPeerConnection(userData) {
     
     // Check if localStream has valid tracks before using it
     const hasValidTracks = localStream && 
-                          (localStream.getVideoTracks().length > 0 || 
-                           localStream.getAudioTracks().length > 0);
+                         (localStream.getVideoTracks().length > 0 || 
+                          localStream.getAudioTracks().length > 0);
     
     // Create a new peer connection with explicit configuration
     const peer = new SimplePeer({
@@ -1573,69 +1652,6 @@ function createPeerConnection(userData) {
         showNotification(`Connected to ${userData.name}`, 'success', 2000);
     });
 }
-    
-    // Store the peer connection
-    peers[peerId] = peer;
-    userConnections[peerId] = userData;
-    
-    // Create video container in advance
-    createPeerVideoContainer(peerId, userData.name);
-    
-    // Handle signals (WebRTC negotiation)
-    peer.on('signal', signal => {
-        // More granular signal handling
-        let signalType = 'ice-candidate';
-        if (signal.type === 'offer' || signal.type === 'answer') {
-            signalType = signal.type;
-        } else if (signal.sdp) {
-            signalType = 'offer';
-        }
-        
-        debugLog(`Sending ${signalType} signal to peer ${userData.name}`);
-        
-        // Send signal to Firebase
-        db.ref(`rooms/${currentRoom}/signals/${peerId}`).push({
-            from: currentUser.id,
-            type: signalType,
-            data: signal,
-            timestamp: firebase.database.ServerValue.TIMESTAMP
-        });
-    });
-    
-    // Handle incoming stream
-    peer.on('stream', stream => {
-        debugLog(`Received stream from peer ${userData.name}`, stream);
-        
-        // Update the peer's video element with the stream
-        updatePeerStream(peerId, userData.name, stream);
-    });
-    
-    // Handle connection close
-    peer.on('close', () => {
-        removePeerConnection(peerId);
-    });
-    
-    // Handle errors
-    peer.on('error', err => {
-        debugLog(`WebRTC error with peer ${userData.name}:`, err);
-        showNotification(`Connection error with ${userData.name}`, 'error');
-        
-        // Attempt reconnection after a delay
-        setTimeout(() => {
-            if (userConnections[peerId]) {
-                debugLog(`Attempting to reconnect with ${userData.name}`);
-                removePeerConnection(peerId);
-                createPeerConnection(userData);
-            }
-        }, 5000);
-    });
-    
-    // Debug connection state
-    peer.on('connect', () => {
-        debugLog(`Connected to peer ${userData.name}`);
-        showNotification(`Connected to ${userData.name}`, 'success', 2000);
-    });
-}
 
 // Create container for peer video
 function createPeerVideoContainer(peerId, peerName) {
@@ -1674,7 +1690,7 @@ function createPeerVideoContainer(peerId, peerName) {
     
     // Add the elements to the DOM
     overlay.appendChild(nameSpan);
-    overlay.appendChild(audioState);
+      overlay.appendChild(audioState);
     overlay.appendChild(videoState);
     peerVideoContainer.appendChild(peerVideo);
     peerVideoContainer.appendChild(overlay);
@@ -1736,6 +1752,40 @@ function updatePeerStream(peerId, peerName, stream) {
     // Set the stream
     try {
         debugLog(`Setting stream for peer ${peerName}`);
+        
+        // Handle null or empty stream
+        if (!stream) {
+            debugLog(`No stream available for peer ${peerName}`);
+            peerVideo.style.backgroundColor = "#1a2235";
+            
+            // Add a camera-off icon
+            const noVideoIndicator = document.createElement('div');
+            noVideoIndicator.innerHTML = '<i class="fas fa-video-slash"></i>';
+            noVideoIndicator.className = 'no-video-indicator';
+            noVideoIndicator.style.position = 'absolute';
+            noVideoIndicator.style.top = '50%';
+            noVideoIndicator.style.left = '50%';
+            noVideoIndicator.style.transform = 'translate(-50%, -50%)';
+            noVideoIndicator.style.fontSize = '2rem';
+            noVideoIndicator.style.color = 'rgba(255,255,255,0.5)';
+            
+            // Remove any existing indicator first
+            const existingIndicator = peerVideoContainer.querySelector('.no-video-indicator');
+            if (existingIndicator) {
+                existingIndicator.remove();
+            }
+            
+            peerVideoContainer.appendChild(noVideoIndicator);
+            
+            // Hide loading indicator
+            const loadingIndicator = peerVideoContainer.querySelector('.video-loading');
+            if (loadingIndicator) {
+                loadingIndicator.style.display = 'none';
+            }
+            
+            return;
+        }
+        
         peerVideo.srcObject = stream;
         
         // Add placeholder background if no video tracks
@@ -1760,6 +1810,12 @@ function updatePeerStream(peerId, peerName, stream) {
             }
             
             peerVideoContainer.appendChild(noVideoIndicator);
+        } else {
+            // Remove any no-video indicators if we have video tracks
+            const existingIndicator = peerVideoContainer.querySelector('.no-video-indicator');
+            if (existingIndicator) {
+                existingIndicator.remove();
+            }
         }
         
         // Attempt to play the video
@@ -1799,6 +1855,12 @@ function updatePeerStream(peerId, peerName, stream) {
                         .catch(e => {
                             debugLog(`Still can't play video for ${peerName}:`, e);
                             showNotification(`Error displaying ${peerName}'s video`, 'error');
+                            
+                            // Hide loading indicator even if there's an error
+                            const loadingIndicator = peerVideoContainer.querySelector('.video-loading');
+                            if (loadingIndicator) {
+                                loadingIndicator.style.display = 'none';
+                            }
                         });
                 });
         } else {
@@ -1816,8 +1878,15 @@ function updatePeerStream(peerId, peerName, stream) {
         updatePeerMediaState(userConnections[peerId]);
     } catch (err) {
         debugLog(`Error setting stream for peer ${peerName}:`, err);
+        
+        // Hide loading indicator even if there's an error
+        const loadingIndicator = peerVideoContainer.querySelector('.video-loading');
+        if (loadingIndicator) {
+            loadingIndicator.style.display = 'none';
+        }
     }
 }
+
 function updatePeerMediaState(userData) {
     if (!userData) return;
     
@@ -1857,6 +1926,28 @@ function updatePeerMediaState(userData) {
         // Add muted class if needed
         audioIcon.classList.toggle('muted', !userData.isAudioEnabled);
         videoIcon.classList.toggle('muted', !userData.isVideoEnabled);
+        
+        // If video is disabled, ensure the no-video indicator is shown
+        if (!userData.isVideoEnabled) {
+            if (!peerVideoContainer.querySelector('.no-video-indicator')) {
+                const noVideoIndicator = document.createElement('div');
+                noVideoIndicator.innerHTML = '<i class="fas fa-video-slash"></i>';
+                noVideoIndicator.className = 'no-video-indicator';
+                noVideoIndicator.style.position = 'absolute';
+                noVideoIndicator.style.top = '50%';
+                noVideoIndicator.style.left = '50%';
+                noVideoIndicator.style.transform = 'translate(-50%, -50%)';
+                noVideoIndicator.style.fontSize = '2rem';
+                noVideoIndicator.style.color = 'rgba(255,255,255,0.5)';
+                peerVideoContainer.appendChild(noVideoIndicator);
+            }
+        } else {
+            // If video is enabled, remove the indicator if it exists
+            const indicator = peerVideoContainer.querySelector('.no-video-indicator');
+            if (indicator) {
+                indicator.remove();
+            }
+        }
     }
 }
 
@@ -1982,103 +2073,5 @@ if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
         }, function(err) {
             debugLog('ServiceWorker registration failed: ', err);
         });
-    });
-}
-
-const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    // Better to use your own TURN server or a more reliable service
-    { 
-        urls: 'turn:numb.viagenie.ca',
-        username: 'webrtc@live.com',
-        credential: 'muazkh'
-    },
-    // Add more TURN servers as backup
-    {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-    }
-];
-
-peer.on('error', err => {
-    debugLog(`WebRTC error with peer ${userData.name}:`, err);
-    showNotification(`Connection error with ${userData.name}`, 'error');
-    
-    // Show reconnecting indicator in the UI
-    const peerVideoContainer = document.getElementById(`peer-${peerId}`);
-    if (peerVideoContainer) {
-        const reconnectingIndicator = document.createElement('div');
-        reconnectingIndicator.className = 'reconnecting-indicator';
-        reconnectingIndicator.innerText = 'Reconnecting...';
-        reconnectingIndicator.style.position = 'absolute';
-        reconnectingIndicator.style.bottom = '40px';
-        reconnectingIndicator.style.left = '50%';
-        reconnectingIndicator.style.transform = 'translateX(-50%)';
-        reconnectingIndicator.style.background = 'rgba(255, 69, 85, 0.7)';
-        reconnectingIndicator.style.padding = '3px 8px';
-        reconnectingIndicator.style.borderRadius = '3px';
-        
-        // Remove existing indicator if present
-        const existingIndicator = peerVideoContainer.querySelector('.reconnecting-indicator');
-        if (existingIndicator) existingIndicator.remove();
-        
-        peerVideoContainer.appendChild(reconnectingIndicator);
-    }
-    
-    // Attempt reconnection after a delay with exponential backoff
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    
-    function attemptReconnect() {
-        if (reconnectAttempts >= maxReconnectAttempts || !userConnections[peerId]) return;
-        
-        reconnectAttempts++;
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff with 30s max
-        
-        setTimeout(() => {
-            debugLog(`Attempting to reconnect with ${userData.name} (attempt ${reconnectAttempts})`);
-            removePeerConnection(peerId);
-            createPeerConnection(userData);
-        }, delay);
-    }
-    
-    attemptReconnect();
-});
-
-// Add this function to help with debugging
-function logMediaState() {
-    debugLog("Media State Debug:");
-    
-    // Log local stream status
-    debugLog(`- Local stream exists: ${localStream !== null}`);
-    if (localStream) {
-        debugLog(`- Local video tracks: ${localStream.getVideoTracks().length}`);
-        debugLog(`- Local audio tracks: ${localStream.getAudioTracks().length}`);
-        
-        const videoTrack = localStream.getVideoTracks()[0];
-        if (videoTrack) {
-            debugLog(`- Video track enabled: ${videoTrack.enabled}`);
-            debugLog(`- Video track settings: ${JSON.stringify(videoTrack.getSettings())}`);
-        }
-    }
-    
-    // Log peer connections
-    debugLog(`- Peer connections count: ${Object.keys(peers).length}`);
-    Object.keys(peers).forEach(peerId => {
-        const peerConnected = peers[peerId] && peers[peerId]._connected;
-        debugLog(`  > Peer ${peerId}: ${peerConnected ? 'Connected' : 'Not connected'}`);
-    });
-    
-    // Check video elements
-    const videoElements = document.querySelectorAll('video');
-    debugLog(`- Video elements on page: ${videoElements.length}`);
-    videoElements.forEach((video, i) => {
-        const hasSource = video.srcObject !== null;
-        debugLog(`  > Video ${i} (${video.id}): Has source: ${hasSource}, Size: ${video.videoWidth}x${video.videoHeight}`);
     });
 }
