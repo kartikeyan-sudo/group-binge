@@ -57,7 +57,8 @@ navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream =>
     myVideo.autoplay = true;
     myVideo.playsInline = true;
     myVideo.style.display = 'block';
-    myVideo.play().catch(() => {});
+    myVideo.load?.();
+    myVideo.onloadedmetadata = () => myVideo.play().catch(() => {});
   }
   console.log("Local video stream acquired");
 }).catch((err) => {
@@ -179,7 +180,6 @@ function joinRoom(roomRef, initiator) {
 
   let hasSignaledOffer = false;
   let hasSignaledAnswer = false;
-  let offerSub = null, answerSub = null;
 
   peer.on('signal', data => {
     if (initiator && !hasSignaledOffer) {
@@ -194,7 +194,7 @@ function joinRoom(roomRef, initiator) {
   });
 
   if (initiator) {
-    answerSub = roomRef.child('answer').on('value', snapshot => {
+    roomRef.child('answer').on('value', snapshot => {
       const answer = snapshot.val();
       if (answer && !peer.destroyed) {
         try {
@@ -206,7 +206,7 @@ function joinRoom(roomRef, initiator) {
       }
     });
   } else {
-    offerSub = roomRef.child('offer').on('value', snapshot => {
+    roomRef.child('offer').on('value', snapshot => {
       const offer = snapshot.val();
       if (offer && !peer.destroyed) {
         try {
@@ -228,22 +228,25 @@ function joinRoom(roomRef, initiator) {
 
   peer.on('stream', stream => {
     console.log("Peer video stream received", stream);
-    try {
-      if (peerVideo) {
-        peerVideo.srcObject = null; // force refresh
+    if (peerVideo) {
+      try {
+        peerVideo.srcObject = null;
         peerVideo.srcObject = stream;
         peerVideo.autoplay = true;
         peerVideo.playsInline = true;
         peerVideo.muted = false;
         peerVideo.style.display = 'block';
         peerCard.style.display = 'block';
+        // Try to play the video (required for some browsers)
+        peerVideo.load?.();
+        peerVideo.onloadedmetadata = () => peerVideo.play().catch(()=>{});
         setTimeout(() => peerVideo.play().catch(()=>{}), 200);
         console.log("Peer video element updated and displayed");
-      } else {
-        alert("peerVideo element missing!");
+      } catch(e) {
+        console.error("Error setting peer video srcObject:", e);
       }
-    } catch(e) {
-      console.error("Error setting peer video srcObject:", e);
+    } else {
+      alert("peerVideo element missing!");
     }
   });
 
@@ -251,11 +254,9 @@ function joinRoom(roomRef, initiator) {
     setStatus('Peer disconnected.');
     if (peerCard) peerCard.style.display = 'none';
     console.warn('Peer connection closed');
-    // Optionally clean up the room for rejoining
+    // Clean up the room for rejoining
     roomRef.child('offer').remove();
     roomRef.child('answer').remove();
-    if (offerSub) roomRef.child('offer').off('value', offerSub);
-    if (answerSub) roomRef.child('answer').off('value', answerSub);
   });
 
   peer.on('error', err => {
