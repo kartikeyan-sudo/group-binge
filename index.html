@@ -1,78 +1,126 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>BingeBase – Watch Together & Chat</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#7c3aed">
-  <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
-  <!-- Never include the YouTube IFrame API script directly here! -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avengers Assemble Watch Party</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+    <!-- YouTube iFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <!-- Simple Peer for WebRTC -->
+    <script src="https://unpkg.com/simple-peer@9.11.0/simplepeer.min.js"></script>
 </head>
 <body>
-  <header>
-    <div class="logo">
-      <span>🎬</span>
-      <span class="brand">BingeBase</span>
+    <!-- Splash Screen / Login -->
+    <div id="splashScreen" class="splash-screen">
+        <div class="avengers-logo">
+            <img src="https://i.imgur.com/xZoZhd8.png" alt="Avengers Logo">
+        </div>
+        <h1>AVENGERS WATCH PARTY</h1>
+        <div class="login-container">
+            <input type="text" id="nameInput" placeholder="Enter your codename..." maxlength="15">
+            <div class="room-controls">
+                <input type="text" id="roomInput" placeholder="Enter room ID...">
+                <button id="createRoomBtn" class="glow-button">Create Room</button>
+                <button id="joinRoomBtn" class="glow-button">Join Room</button>
+            </div>
+        </div>
     </div>
-    <div class="subtitle">Watch YouTube Together · P2P Video Chat · Real-time Chat · Emojis</div>
-  </header>
-  <main>
-    <aside>
-      <form class="glass-panel" id="room-form" onsubmit="event.preventDefault(); createOrJoin();">
-        <label for="roomid">Room Name</label>
-        <input id="roomid" autocomplete="off" placeholder="Enter Room Name" required>
-        <button type="submit">Join Room</button>
-      </form>
-      <div id="status" class="status glass-panel"></div>
-      <section class="peers glass-panel">
-        <div class="video-card self">
-          <div class="avatar" id="self-username">You</div>
-          <video id="myvideo" autoplay playsinline muted style="display: block;"></video>
+
+    <!-- Main App -->
+    <div id="mainApp" class="hidden">
+        <!-- Header with Room Info -->
+        <header>
+            <div class="room-info">
+                <div class="room-id">
+                    <span>ROOM ID: </span>
+                    <span id="roomIdDisplay"></span>
+                    <button id="copyRoomId" title="Copy Room ID">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <div class="user-count">
+                    <i class="fas fa-users"></i>
+                    <span id="userCountDisplay">1</span>
+                </div>
+            </div>
+            <div class="room-actions">
+                <button id="leaveRoomBtn"><i class="fas fa-sign-out-alt"></i> Exit</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- YouTube Player Section -->
+            <div class="youtube-section">
+                <div id="youtubePlayer"></div>
+                <div class="video-controls">
+                    <input type="text" id="videoIdInput" placeholder="Enter YouTube Video ID or URL...">
+                    <button id="loadVideoBtn">Load Video</button>
+                    <div class="playback-controls">
+                        <button id="playBtn"><i class="fas fa-play"></i></button>
+                        <button id="pauseBtn"><i class="fas fa-pause"></i></button>
+                        <input type="range" id="seekBar" min="0" max="100" value="0">
+                        <span id="currentTime">0:00</span> / <span id="totalTime">0:00</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel (Peers & Chat) -->
+            <div class="right-panel">
+                <!-- Peer Video Section -->
+                <div class="peers-section">
+                    <h3><i class="fas fa-users"></i> AVENGERS TEAM</h3>
+                    <div class="video-grid" id="peersContainer">
+                        <div class="video-container local-video-container">
+                            <video id="localVideo" autoplay muted playsinline></video>
+                            <div class="video-overlay">
+                                <span class="user-name" id="localUserName">You</span>
+                                <div class="video-controls">
+                                    <button id="toggleAudioBtn" class="control-btn"><i class="fas fa-microphone"></i></button>
+                                    <button id="toggleVideoBtn" class="control-btn"><i class="fas fa-video"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Peer videos will be added here dynamically -->
+                    </div>
+                </div>
+
+                <!-- Chat Section -->
+                <div class="chat-section">
+                    <h3><i class="fas fa-comment-alt"></i> TEAM COMMS</h3>
+                    <div class="chat-messages" id="chatMessages">
+                        <!-- Messages will be added here dynamically -->
+                        <div class="welcome-message">
+                            <p>Welcome to the Avengers Watch Party! Share the Room ID to invite teammates.</p>
+                        </div>
+                    </div>
+                    <div class="chat-input">
+                        <input type="text" id="messageInput" placeholder="Type your message...">
+                        <button id="sendMessageBtn"><i class="fas fa-paper-plane"></i></button>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div class="video-card" id="peer-card" style="display:none;">
-          <div class="avatar" id="peer-username">Friend</div>
-          <video id="peervideo" autoplay playsinline></video>
-        </div>
-      </section>
-      <section id="chat-section" class="glass-panel chat-panel">
-        <div class="chat-header">
-          💬 Live Chat
-          <span class="emoji-bar">
-            <button type="button" class="emoji-btn">😂</button>
-            <button type="button" class="emoji-btn">😍</button>
-            <button type="button" class="emoji-btn">🔥</button>
-            <button type="button" class="emoji-btn">💯</button>
-            <button type="button" class="emoji-btn">🍿</button>
-            <button type="button" class="emoji-btn">😭</button>
-            <button type="button" class="emoji-btn">👍</button>
-          </span>
-        </div>
-        <div id="chat-messages" class="chat-messages"></div>
-        <form id="chat-form" class="chat-form" autocomplete="off">
-          <input id="chat-input" placeholder="Type a message..." maxlength="300" autocomplete="off">
-          <button type="submit">Send</button>
-        </form>
-      </section>
-      <audio id="notify-audio" src="https://cdn.pixabay.com/audio/2022/03/15/audio_116b9e4f2e.mp3"></audio>
-    </aside>
-    <section class="center-panel glass-panel">
-      <form class="yt-form" onsubmit="event.preventDefault(); setYT();">
-        <label for="ytlink">YouTube Link</label>
-        <input id="ytlink" autocomplete="off" placeholder="Paste YouTube URL">
-        <button type="submit">Sync Video</button>
-      </form>
-      <div class="yt-area">
-        <!-- Correct: Use a div for the YouTube IFrame API! -->
-        <div id="ytplayer" class="yt-player"></div>
-      </div>
-    </section>
-  </main>
-  <footer>
-    <span>Made with ❤️ for movie nights · <a href="https://github.com/kartikeyan-sudo" target="_blank">kartikeyan-sudo</a></span>
-  </footer>
-  <script src="app.js"></script>
+    </div>
+
+    <!-- Iron Man HUD Overlay Effects -->
+    <div class="hud-overlay">
+        <div class="hud-corner top-left"></div>
+        <div class="hud-corner top-right"></div>
+        <div class="hud-corner bottom-left"></div>
+        <div class="hud-corner bottom-right"></div>
+    </div>
+    
+    <!-- Notifications -->
+    <div id="notificationContainer"></div>
+
+    <!-- Scripts -->
+    <script src="app.js"></script>
 </body>
 </html>
