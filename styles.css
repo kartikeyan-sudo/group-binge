@@ -663,3 +663,46 @@ header {
         height: 36px;
     }
 }
+
+/* Audio/Video state indicators */
+.audio-state, .video-state {
+    color: var(--text-primary);
+    background-color: rgba(0, 0, 0, 0.4);
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 4px;
+}
+
+.audio-state.muted, .video-state.muted {
+    color: var(--danger);
+}
+
+.video-overlay {
+    display: flex;
+    align-items: center;
+}
+
+/* Add for the new sync button */
+#syncBtn {
+    margin-top: 10px;
+    padding: 8px 15px;
+    background-color: var(--gold);
+    color: var(--background-color);
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    align-self: center;
+}
+
+#syncBtn:hover {
+    background-color: #e0a61e;
+    box-shadow: 0 0 10px rgba(240, 179, 35, 0.5);
+}
