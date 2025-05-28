@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Watch Together: Modern Firebase P2P</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#7c3aed"/>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <span>🎬</span>
+      <span class="brand">Watch Together</span>
+    </div>
+    <div class="subtitle">P2P YouTube Sync, Beautiful UI, Firebase Signaling</div>
+  </header>
+  <main>
+    <aside>
+      <form class="glass-panel" id="room-form" onsubmit="event.preventDefault(); createOrJoin();">
+        <label for="roomid">Room ID</label>
+        <input id="roomid" autocomplete="off" placeholder="Enter Room Name" required />
+        <button type="submit">Join Room</button>
+      </form>
+      <div id="status" class="status glass-panel"></div>
+      <section class="peers glass-panel">
+        <div class="video-card self">
+          <div class="avatar">You</div>
+          <video id="myvideo" autoplay playsinline muted></video>
+        </div>
+        <div class="video-card" id="peer-card" style="display:none;">
+          <div class="avatar">Peer</div>
+          <video id="peervideo" autoplay playsinline></video>
+        </div>
+      </section>
+    </aside>
+    <section class="center-panel glass-panel">
+      <form class="yt-form" onsubmit="event.preventDefault(); setYT();">
+        <label for="ytlink">YouTube Link</label>
+        <input id="ytlink" autocomplete="off" placeholder="Paste YouTube URL" />
+        <button type="submit">Sync Video</button>
+      </form>
+      <div class="yt-area">
+        <div id="ytplayer" class="yt-player"></div>
+      </div>
+    </section>
+  </main>
+  <footer>
+    <span>Made with ❤️ by <a href="https://github.com/kartikeyan-sudo" target="_blank">kartikeyan-sudo</a></span>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>
