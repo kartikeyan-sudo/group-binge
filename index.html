@@ -4,11 +4,12 @@
   <meta charset="UTF-8">
   <title>BingeBase – Watch Together & Chat</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#7c3aed"/>
+  <meta name="theme-color" content="#7c3aed">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <!-- Never include the YouTube IFrame API script directly here! -->
 </head>
 <body>
   <header>
@@ -22,14 +23,14 @@
     <aside>
       <form class="glass-panel" id="room-form" onsubmit="event.preventDefault(); createOrJoin();">
         <label for="roomid">Room Name</label>
-        <input id="roomid" autocomplete="off" placeholder="Enter Room Name" required />
+        <input id="roomid" autocomplete="off" placeholder="Enter Room Name" required>
         <button type="submit">Join Room</button>
       </form>
       <div id="status" class="status glass-panel"></div>
       <section class="peers glass-panel">
         <div class="video-card self">
           <div class="avatar" id="self-username">You</div>
-          <video id="myvideo" autoplay playsinline muted></video>
+          <video id="myvideo" autoplay playsinline muted style="display: block;"></video>
         </div>
         <div class="video-card" id="peer-card" style="display:none;">
           <div class="avatar" id="peer-username">Friend</div>
@@ -51,7 +52,7 @@
         </div>
         <div id="chat-messages" class="chat-messages"></div>
         <form id="chat-form" class="chat-form" autocomplete="off">
-          <input id="chat-input" placeholder="Type a message..." maxlength="300" autocomplete="off" />
+          <input id="chat-input" placeholder="Type a message..." maxlength="300" autocomplete="off">
           <button type="submit">Send</button>
         </form>
       </section>
@@ -60,10 +61,11 @@
     <section class="center-panel glass-panel">
       <form class="yt-form" onsubmit="event.preventDefault(); setYT();">
         <label for="ytlink">YouTube Link</label>
-        <input id="ytlink" autocomplete="off" placeholder="Paste YouTube URL" />
+        <input id="ytlink" autocomplete="off" placeholder="Paste YouTube URL">
         <button type="submit">Sync Video</button>
       </form>
       <div class="yt-area">
+        <!-- Correct: Use a div for the YouTube IFrame API! -->
         <div id="ytplayer" class="yt-player"></div>
       </div>
     </section>
