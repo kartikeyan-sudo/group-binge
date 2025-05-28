@@ -187,39 +187,6 @@ function showNotification(message, type = 'info', duration = 3000) {
     }, duration);
 }
 
-// Add this function to help with debugging
-function logMediaState() {
-    debugLog("Media State Debug:");
-    
-    // Log local stream status
-    debugLog(`- Local stream exists: ${localStream !== null}`);
-    if (localStream) {
-        debugLog(`- Local video tracks: ${localStream.getVideoTracks().length}`);
-        debugLog(`- Local audio tracks: ${localStream.getAudioTracks().length}`);
-        
-        const videoTrack = localStream.getVideoTracks()[0];
-        if (videoTrack) {
-            debugLog(`- Video track enabled: ${videoTrack.enabled}`);
-            debugLog(`- Video track settings: ${JSON.stringify(videoTrack.getSettings())}`);
-        }
-    }
-    
-    // Log peer connections
-    debugLog(`- Peer connections count: ${Object.keys(peers).length}`);
-    Object.keys(peers).forEach(peerId => {
-        const peerConnected = peers[peerId] && peers[peerId]._connected;
-        debugLog(`  > Peer ${peerId}: ${peerConnected ? 'Connected' : 'Not connected'}`);
-    });
-    
-    // Check video elements
-    const videoElements = document.querySelectorAll('video');
-    debugLog(`- Video elements on page: ${videoElements.length}`);
-    videoElements.forEach((video, i) => {
-        const hasSource = video.srcObject !== null;
-        debugLog(`  > Video ${i} (${video.id}): Has source: ${hasSource}, Size: ${video.videoWidth}x${video.videoHeight}`);
-    });
-}
-
 // ----- Room Management -----
 function createRoom() {
     console.log('Create room button clicked'); // Debug logging
@@ -262,9 +229,6 @@ function createRoom() {
         // Initialize media after UI transition
         initializeUserMedia()
             .then(() => {
-                // Log media state for debugging
-                logMediaState();
-                
                 // Continue with room setup
                 setupFirebaseListeners();
                 setTimeout(() => {
@@ -336,9 +300,6 @@ function joinRoom() {
             // Initialize media after UI transition
             initializeUserMedia()
                 .then(() => {
-                    // Log media state for debugging
-                    logMediaState();
-                    
                     // Continue with room setup
                     setupFirebaseListeners();
                     setTimeout(() => {
@@ -729,43 +690,15 @@ function leaveRoom() {
 async function initializeUserMedia() {
     try {
         debugLog('Requesting user media access');
-        try {
-            // Try high quality first
-            localStream = await navigator.mediaDevices.getUserMedia({ 
-                video: { 
-                    width: { ideal: 640 },
-                    height: { ideal: 480 },
-                    facingMode: "user"
-                }, 
-                audio: true
-            });
-        } catch (highQualityError) {
-            debugLog('Failed to get high quality video, trying lower quality');
-            try {
-                // Fall back to lower quality
-                localStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 320 },
-                        height: { ideal: 240 }
-                    }, 
-                    audio: true
-                });
-            } catch (lowQualityError) {
-                debugLog('Failed to get lower quality video, trying audio only');
-                try {
-                    // Last resort - audio only
-                    localStream = await navigator.mediaDevices.getUserMedia({ 
-                        video: false, 
-                        audio: true
-                    });
-                    
-                    // Update video state since we only have audio
-                    currentUser.isVideoEnabled = false;
-                } catch (audioOnlyError) {
-                    throw highQualityError; // Throw the original error
-                }
-            }
-        }
+        // Request camera and microphone access
+        localStream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: "user"
+            }, 
+            audio: true
+        });
         
         debugLog('User media access granted');
         
@@ -773,15 +706,9 @@ async function initializeUserMedia() {
         localVideo.srcObject = localStream;
         hasInitializedStream = true;
         
-        // Set initial states based on what tracks we actually got
-        currentUser.isAudioEnabled = localStream.getAudioTracks().length > 0;
-        currentUser.isVideoEnabled = localStream.getVideoTracks().length > 0;
-        
-        // Update UI to reflect actual state
-        if (!currentUser.isVideoEnabled) {
-            toggleVideoBtn.innerHTML = '<i class="fas fa-video-slash"></i>';
-            toggleVideoBtn.classList.add('muted');
-        }
+        // Set initial states
+        currentUser.isAudioEnabled = true;
+        currentUser.isVideoEnabled = true;
         
         return true;
     } catch (error) {
@@ -795,13 +722,10 @@ function toggleAudio() {
     
     currentUser.isAudioEnabled = !currentUser.isAudioEnabled;
     
-    // Update local audio tracks if they exist
-    const audioTracks = localStream.getAudioTracks();
-    if (audioTracks.length > 0) {
-        audioTracks.forEach(track => {
-            track.enabled = currentUser.isAudioEnabled;
-        });
-    }
+    // Update local audio tracks
+    localStream.getAudioTracks().forEach(track => {
+        track.enabled = currentUser.isAudioEnabled;
+    });
     
     // Update UI
     toggleAudioBtn.innerHTML = currentUser.isAudioEnabled ? 
@@ -823,13 +747,10 @@ function toggleVideo() {
     
     currentUser.isVideoEnabled = !currentUser.isVideoEnabled;
     
-    // Update local video tracks if they exist
-    const videoTracks = localStream.getVideoTracks();
-    if (videoTracks.length > 0) {
-        videoTracks.forEach(track => {
-            track.enabled = currentUser.isVideoEnabled;
-        });
-    }
+    // Update local video tracks
+    localStream.getVideoTracks().forEach(track => {
+        track.enabled = currentUser.isVideoEnabled;
+    });
     
     // Update UI
     toggleVideoBtn.innerHTML = currentUser.isVideoEnabled ? 
@@ -1528,16 +1449,11 @@ function createPeerConnection(userData) {
     
     debugLog(`Creating connection with peer: ${userData.name} (${peerId})`);
     
-    // Check if localStream has valid tracks before using it
-    const hasValidTracks = localStream && 
-                         (localStream.getVideoTracks().length > 0 || 
-                          localStream.getAudioTracks().length > 0);
-    
     // Create a new peer connection with explicit configuration
     const peer = new SimplePeer({
         initiator: currentUser.id > peerId, // Deterministic initiator based on ID comparison
         trickle: true, // Enable trickle ICE for better connectivity
-        stream: hasValidTracks ? localStream : null, // Only pass stream if it has tracks
+        stream: localStream,
         config: { // Explicit STUN/TURN server configuration
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -1549,11 +1465,6 @@ function createPeerConnection(userData) {
                     urls: 'turn:numb.viagenie.ca',
                     username: 'webrtc@live.com',
                     credential: 'muazkh'
-                },
-                { // Add backup TURN server
-                    urls: 'turn:openrelay.metered.ca:80',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
                 }
             ]
         }
@@ -1600,50 +1511,19 @@ function createPeerConnection(userData) {
         removePeerConnection(peerId);
     });
     
-    // Handle errors with improved reconnection logic
+    // Handle errors
     peer.on('error', err => {
         debugLog(`WebRTC error with peer ${userData.name}:`, err);
         showNotification(`Connection error with ${userData.name}`, 'error');
         
-        // Show reconnecting indicator in the UI
-        const peerVideoContainer = document.getElementById(`peer-${peerId}`);
-        if (peerVideoContainer) {
-            const reconnectingIndicator = document.createElement('div');
-            reconnectingIndicator.className = 'reconnecting-indicator';
-            reconnectingIndicator.innerText = 'Reconnecting...';
-            reconnectingIndicator.style.position = 'absolute';
-            reconnectingIndicator.style.bottom = '40px';
-            reconnectingIndicator.style.left = '50%';
-            reconnectingIndicator.style.transform = 'translateX(-50%)';
-            reconnectingIndicator.style.background = 'rgba(255, 69, 85, 0.7)';
-            reconnectingIndicator.style.padding = '3px 8px';
-            reconnectingIndicator.style.borderRadius = '3px';
-            
-            // Remove existing indicator if present
-            const existingIndicator = peerVideoContainer.querySelector('.reconnecting-indicator');
-            if (existingIndicator) existingIndicator.remove();
-            
-            peerVideoContainer.appendChild(reconnectingIndicator);
-        }
-        
-        // Attempt reconnection after a delay with exponential backoff
-        let reconnectAttempts = 0;
-        const maxReconnectAttempts = 5;
-        
-        function attemptReconnect() {
-            if (reconnectAttempts >= maxReconnectAttempts || !userConnections[peerId]) return;
-            
-            reconnectAttempts++;
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff with 30s max
-            
-            setTimeout(() => {
-                debugLog(`Attempting to reconnect with ${userData.name} (attempt ${reconnectAttempts})`);
+        // Attempt reconnection after a delay
+        setTimeout(() => {
+            if (userConnections[peerId]) {
+                debugLog(`Attempting to reconnect with ${userData.name}`);
                 removePeerConnection(peerId);
                 createPeerConnection(userData);
-            }, delay);
-        }
-        
-        attemptReconnect();
+            }
+        }, 5000);
     });
     
     // Debug connection state
@@ -1690,7 +1570,7 @@ function createPeerVideoContainer(peerId, peerName) {
     
     // Add the elements to the DOM
     overlay.appendChild(nameSpan);
-      overlay.appendChild(audioState);
+    overlay.appendChild(audioState);
     overlay.appendChild(videoState);
     peerVideoContainer.appendChild(peerVideo);
     peerVideoContainer.appendChild(overlay);
@@ -1746,77 +1626,10 @@ function updatePeerStream(peerId, peerName, stream) {
         return;
     }
     
-    // Check if stream has video tracks
-    const hasVideoTracks = stream && stream.getVideoTracks().length > 0;
-    
     // Set the stream
     try {
         debugLog(`Setting stream for peer ${peerName}`);
-        
-        // Handle null or empty stream
-        if (!stream) {
-            debugLog(`No stream available for peer ${peerName}`);
-            peerVideo.style.backgroundColor = "#1a2235";
-            
-            // Add a camera-off icon
-            const noVideoIndicator = document.createElement('div');
-            noVideoIndicator.innerHTML = '<i class="fas fa-video-slash"></i>';
-            noVideoIndicator.className = 'no-video-indicator';
-            noVideoIndicator.style.position = 'absolute';
-            noVideoIndicator.style.top = '50%';
-            noVideoIndicator.style.left = '50%';
-            noVideoIndicator.style.transform = 'translate(-50%, -50%)';
-            noVideoIndicator.style.fontSize = '2rem';
-            noVideoIndicator.style.color = 'rgba(255,255,255,0.5)';
-            
-            // Remove any existing indicator first
-            const existingIndicator = peerVideoContainer.querySelector('.no-video-indicator');
-            if (existingIndicator) {
-                existingIndicator.remove();
-            }
-            
-            peerVideoContainer.appendChild(noVideoIndicator);
-            
-            // Hide loading indicator
-            const loadingIndicator = peerVideoContainer.querySelector('.video-loading');
-            if (loadingIndicator) {
-                loadingIndicator.style.display = 'none';
-            }
-            
-            return;
-        }
-        
         peerVideo.srcObject = stream;
-        
-        // Add placeholder background if no video tracks
-        if (!hasVideoTracks) {
-            peerVideo.style.backgroundColor = "#1a2235";
-            
-            // Add a camera-off icon
-            const noVideoIndicator = document.createElement('div');
-            noVideoIndicator.innerHTML = '<i class="fas fa-video-slash"></i>';
-            noVideoIndicator.className = 'no-video-indicator';
-            noVideoIndicator.style.position = 'absolute';
-            noVideoIndicator.style.top = '50%';
-            noVideoIndicator.style.left = '50%';
-            noVideoIndicator.style.transform = 'translate(-50%, -50%)';
-            noVideoIndicator.style.fontSize = '2rem';
-            noVideoIndicator.style.color = 'rgba(255,255,255,0.5)';
-            
-            // Remove any existing indicator first
-            const existingIndicator = peerVideoContainer.querySelector('.no-video-indicator');
-            if (existingIndicator) {
-                existingIndicator.remove();
-            }
-            
-            peerVideoContainer.appendChild(noVideoIndicator);
-        } else {
-            // Remove any no-video indicators if we have video tracks
-            const existingIndicator = peerVideoContainer.querySelector('.no-video-indicator');
-            if (existingIndicator) {
-                existingIndicator.remove();
-            }
-        }
         
         // Attempt to play the video
         const playPromise = peerVideo.play();
@@ -1855,12 +1668,6 @@ function updatePeerStream(peerId, peerName, stream) {
                         .catch(e => {
                             debugLog(`Still can't play video for ${peerName}:`, e);
                             showNotification(`Error displaying ${peerName}'s video`, 'error');
-                            
-                            // Hide loading indicator even if there's an error
-                            const loadingIndicator = peerVideoContainer.querySelector('.video-loading');
-                            if (loadingIndicator) {
-                                loadingIndicator.style.display = 'none';
-                            }
                         });
                 });
         } else {
@@ -1878,12 +1685,6 @@ function updatePeerStream(peerId, peerName, stream) {
         updatePeerMediaState(userConnections[peerId]);
     } catch (err) {
         debugLog(`Error setting stream for peer ${peerName}:`, err);
-        
-        // Hide loading indicator even if there's an error
-        const loadingIndicator = peerVideoContainer.querySelector('.video-loading');
-        if (loadingIndicator) {
-            loadingIndicator.style.display = 'none';
-        }
     }
 }
 
@@ -1926,28 +1727,6 @@ function updatePeerMediaState(userData) {
         // Add muted class if needed
         audioIcon.classList.toggle('muted', !userData.isAudioEnabled);
         videoIcon.classList.toggle('muted', !userData.isVideoEnabled);
-        
-        // If video is disabled, ensure the no-video indicator is shown
-        if (!userData.isVideoEnabled) {
-            if (!peerVideoContainer.querySelector('.no-video-indicator')) {
-                const noVideoIndicator = document.createElement('div');
-                noVideoIndicator.innerHTML = '<i class="fas fa-video-slash"></i>';
-                noVideoIndicator.className = 'no-video-indicator';
-                noVideoIndicator.style.position = 'absolute';
-                noVideoIndicator.style.top = '50%';
-                noVideoIndicator.style.left = '50%';
-                noVideoIndicator.style.transform = 'translate(-50%, -50%)';
-                noVideoIndicator.style.fontSize = '2rem';
-                noVideoIndicator.style.color = 'rgba(255,255,255,0.5)';
-                peerVideoContainer.appendChild(noVideoIndicator);
-            }
-        } else {
-            // If video is enabled, remove the indicator if it exists
-            const indicator = peerVideoContainer.querySelector('.no-video-indicator');
-            if (indicator) {
-                indicator.remove();
-            }
-        }
     }
 }
 
@@ -2074,320 +1853,4 @@ if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
             debugLog('ServiceWorker registration failed: ', err);
         });
     });
-}
-
-
-
-
-
-
-
-//OVERRIDEN CODE 
-// Handle video state updates from Firebase - enhanced version
-function handleVideoStateUpdate(videoState) {
-    // If we're currently syncing, ignore this update
-    if (isSyncingVideo) return;
-    
-    // Check if this is the same position we recently synced to
-    if (Math.abs(videoState.currentTime - lastSyncPosition) < 1 && 
-        Date.now() - lastUpdateTime < 10000) {
-        consecutiveSyncAttempts++;
-        debugLog(`Detected potential sync loop, attempt ${consecutiveSyncAttempts}`);
-        
-        // If we detect a sync loop, break out of it
-        if (consecutiveSyncAttempts >= MAX_SYNC_ATTEMPTS) {
-            debugLog('Breaking sync loop');
-            syncLoopBreaker = true;
-            
-            // Reset after a while
-            setTimeout(() => {
-                syncLoopBreaker = false;
-                consecutiveSyncAttempts = 0;
-            }, 30000);
-            
-            return;
-        }
-    } else {
-        consecutiveSyncAttempts = 0;
-    }
-    
-    // Record this sync attempt
-    lastUpdateTime = Date.now();
-    lastSyncPosition = videoState.currentTime;
-    
-    // If video ID is different, load the new video
-    if (youtubePlayer.getVideoData && youtubePlayer.getVideoData().video_id !== videoState.videoId) {
-        loadSpecificVideo(videoState.videoId, videoState.currentTime, videoState.isPlaying);
-        return;
-    }
-    
-    // Calculate adjusted time based on elapsed time since update
-    let adjustedTime = videoState.currentTime;
-    if (videoState.isPlaying && videoState.timestamp) {
-        const secondsSinceUpdate = (Date.now() - videoState.timestamp) / 1000;
-        adjustedTime += secondsSinceUpdate;
-    }
-    
-    // Set syncing flag
-    isSyncingVideo = true;
-    
-    debugLog(`Syncing to video state: time=${adjustedTime.toFixed(2)}, playing=${videoState.isPlaying}`);
-    
-    // Get local state
-    const localTime = youtubePlayer.getCurrentTime();
-    const timeDiff = Math.abs(localTime - adjustedTime);
-    
-    // More aggressive sync for larger time differences
-    if (timeDiff > TIME_SYNC_THRESHOLD * 2) {
-        // For significant differences, use the more reliable reload method
-        performForcedSync({
-            videoId: videoState.videoId || youtubePlayer.getVideoData().video_id,
-            currentTime: adjustedTime,
-            isPlaying: videoState.isPlaying,
-            timestamp: Date.now()
-        });
-    }
-    // First handle time synchronization if needed for smaller time differences
-    else if (timeDiff > TIME_SYNC_THRESHOLD) {
-        youtubePlayer.seekTo(adjustedTime, true);
-        
-        // After seeking, handle play state after a delay
-        setTimeout(() => {
-            syncPlayState(videoState.isPlaying);
-            
-            // Reset syncing flag after a delay
-            setTimeout(() => {
-                isSyncingVideo = false;
-            }, 1000);
-        }, 500);
-    } else {
-        // Just sync play state if time is close enough
-        syncPlayState(videoState.isPlaying);
-        
-        // Reset syncing flag faster for minor syncs
-        setTimeout(() => {
-            isSyncingVideo = false;
-        }, 500);
-    }
-}
-
-// Improved forced sync implementation
-function performForcedSync(remoteState) {
-    debugLog('Performing forced sync');
-    showNotification('Synchronizing with room...', 'info');
-    
-    // Set flags
-    isSyncingVideo = true;
-    
-    // Reset sync loop tracking
-    syncLoopBreaker = false;
-    consecutiveSyncAttempts = 0;
-    
-    // Get current video ID - make sure we have a valid ID
-    const videoId = remoteState.videoId || (youtubePlayer.getVideoData ? youtubePlayer.getVideoData().video_id : '');
-    if (!videoId) {
-        debugLog('No video ID available for sync');
-        isSyncingVideo = false;
-        return;
-    }
-    
-    // Calculate adjusted current time
-    let adjustedTime = remoteState.currentTime;
-    if (remoteState.isPlaying && remoteState.timestamp) {
-        const secondsSinceUpdate = (Date.now() - remoteState.timestamp) / 1000;
-        adjustedTime += secondsSinceUpdate;
-    }
-    
-    // Update the input field
-    videoIdInput.value = videoId;
-    
-    // Use a more reliable method to sync - first stop the video
-    try {
-        youtubePlayer.pauseVideo();
-    } catch (err) {
-        debugLog('Error pausing video before sync:', err);
-    }
-    
-    // First cue the video (more reliable loading)
-    youtubePlayer.cueVideoById({
-        videoId: videoId,
-        startSeconds: adjustedTime
-    });
-    
-    // Set playback state after a delay to ensure video loads
-    setTimeout(() => {
-        // Make sure we're at the right position
-        youtubePlayer.seekTo(adjustedTime, true);
-        
-        // Wait a bit before applying play state
-        setTimeout(() => {
-            if (remoteState.isPlaying) {
-                youtubePlayer.playVideo();
-            } else {
-                youtubePlayer.pauseVideo();
-            }
-            
-            // Update local tracking
-            lastKnownVideoTime = adjustedTime;
-            lastKnownPlayState = remoteState.isPlaying;
-            lastUpdateTime = Date.now();
-            lastSyncPosition = adjustedTime;
-            
-            showNotification('Synchronized with room', 'success');
-            
-            // Reset syncing flag after a delay
-            setTimeout(() => {
-                isSyncingVideo = false;
-                // Check if sync was successful
-                verifySuccessfulSync(remoteState);
-            }, 1000);
-        }, 500);
-    }, 1000);
-}
-
-// Verify if the sync was successful
-function verifySuccessfulSync(expectedState) {
-    try {
-        if (!youtubePlayer || !youtubePlayer.getCurrentTime) return;
-        
-        const currentTime = youtubePlayer.getCurrentTime();
-        const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
-        
-        // Calculate expected time based on elapsed time
-        let expectedTime = expectedState.currentTime;
-        if (expectedState.isPlaying) {
-            const secondsSinceUpdate = (Date.now() - expectedState.timestamp) / 1000;
-            expectedTime += secondsSinceUpdate;
-        }
-        
-        const timeDiff = Math.abs(currentTime - expectedTime);
-        
-        // If we're still out of sync after the attempt, try one more time
-        if (timeDiff > TIME_SYNC_THRESHOLD * 2 || isPlaying !== expectedState.isPlaying) {
-            debugLog(`Sync verification failed: time diff=${timeDiff.toFixed(2)}, expected playing=${expectedState.isPlaying}, actual=${isPlaying}`);
-            
-            // Try one more time with a direct approach
-            youtubePlayer.seekTo(expectedTime, true);
-            if (expectedState.isPlaying) {
-                youtubePlayer.playVideo();
-            } else {
-                youtubePlayer.pauseVideo();
-            }
-        }
-    } catch (err) {
-        debugLog('Error in sync verification:', err);
-    }
-}
-
-// Improved host sync function
-function syncEveryone() {
-    if (currentUser.id !== roomHostId) {
-        debugLog('Only the host can sync everyone');
-        return;
-    }
-    
-    // Ensure we have a valid video loaded
-    if (!youtubePlayer || !youtubePlayer.getVideoData || !youtubePlayer.getVideoData().video_id) {
-        showNotification('Please load a video first', 'error');
-        return;
-    }
-    
-    showNotification('Syncing everyone to your playback position...', 'success');
-    
-    const localTime = youtubePlayer.getCurrentTime();
-    const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
-    const videoId = youtubePlayer.getVideoData().video_id;
-    
-    // Update video state with a sync signal - include videoId explicitly
-    db.ref(`rooms/${currentRoom}/videoState`).update({
-        videoId: videoId,
-        isPlaying: isPlaying,
-        currentTime: localTime,
-        timestamp: firebase.database.ServerValue.TIMESTAMP,
-        updatedBy: currentUser.id,
-        syncSignal: true
-    });
-    
-    // Also send a sync command
-    db.ref(`rooms/${currentRoom}/syncCommand`).set({
-        type: 'syncAll',
-        from: currentUser.id,
-        videoId: videoId,  // Include video ID in the sync command
-        timestamp: Date.now()
-    });
-    
-    // Direct sync for each user in the room
-    db.ref(`rooms/${currentRoom}/activeUsers`).once('value', snapshot => {
-        const users = snapshot.val() || {};
-        Object.keys(users).forEach(userId => {
-            if (userId !== currentUser.id) {
-                syncSpecificUser(userId);
-            }
-        });
-    });
-}
-
-// Improved specific user sync function
-function syncSpecificUser(userId) {
-    if (currentUser.id !== roomHostId) return;
-    
-    debugLog(`Syncing user ${userId} to my position`);
-    
-    const localTime = youtubePlayer.getCurrentTime();
-    const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
-    const videoId = youtubePlayer.getVideoData ? youtubePlayer.getVideoData().video_id : '';
-    
-    // Send a direct sync signal to the user with all necessary data
-    db.ref(`rooms/${currentRoom}/users/${userId}/directSync`).set({
-        videoId: videoId,
-        isPlaying: isPlaying,
-        currentTime: localTime,
-        timestamp: firebase.database.ServerValue.TIMESTAMP,
-        from: currentUser.id
-    });
-}
-
-// Add a periodic full sync for non-host users
-setInterval(() => {
-    // Only for non-host users, and only if we're not already syncing
-    if (currentRoom && !isSyncingVideo && currentUser.id !== roomHostId) {
-        verifySync(true); // Pass true to enable auto-sync
-    }
-}, 60000); // Check every minute
-
-// Enhanced verify sync function with option to auto-sync
-function verifySync(autoSync = false) {
-    try {
-        db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
-            const remoteState = snapshot.val();
-            if (!remoteState || !youtubePlayer) return;
-            
-            // Get local state
-            const localTime = youtubePlayer.getCurrentTime();
-            const localIsPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
-            
-            // Calculate time difference accounting for elapsed time
-            let adjustedRemoteTime = remoteState.currentTime;
-            if (remoteState.isPlaying) {
-                const secondsSinceUpdate = (Date.now() - remoteState.timestamp) / 1000;
-                adjustedRemoteTime += secondsSinceUpdate;
-            }
-            
-            const timeDiff = Math.abs(localTime - adjustedRemoteTime);
-            
-            // If we're significantly out of sync
-            if ((remoteState.isPlaying !== localIsPlaying) || (timeDiff > TIME_SYNC_THRESHOLD * 4)) {
-                debugLog(`Out of sync detected: time diff=${timeDiff.toFixed(2)}s, play state=${localIsPlaying} vs ${remoteState.isPlaying}`);
-                
-                if (autoSync) {
-                    debugLog('Auto-syncing with room');
-                    performForcedSync(remoteState);
-                } else {
-                    showNotification('Video out of sync. Click "Force Sync" to synchronize with the room.', 'info', 4000);
-                }
-            }
-        });
-    } catch (err) {
-        debugLog('Error in sync verification:', err);
-    }
 }
