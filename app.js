@@ -40,7 +40,7 @@ let hasInitializedStream = false;
 let lastSyncTime = 0; // Track when we last performed a sync
 let ignoreNextStateChange = false; // Flag to ignore state changes caused by our own sync
 const SYNC_COOLDOWN = 5000; // Minimum time between syncs (5 seconds)
-const TIME_SYNC_THRESHOLD = 5; // Only sync if time difference is greater than this (seconds)
+const TIME_SYNC_THRESHOLD = 50; // Only sync if time difference is greater than this (seconds)
 
 // DOM Elements
 const splashScreen = document.getElementById('splashScreen');
