@@ -190,9 +190,21 @@ video {
   border-radius: 10px;
   box-shadow: 0 3px 14px #0002;
   width: 100%;
-  max-width: 260px;
+  max-width: 270px;
   aspect-ratio: 3/2;
   margin-bottom: 0.1em;
+  object-fit: cover;
+  display: block !important;
+}
+
+#myvideo, #peervideo {
+  min-height: 120px;
+  min-width: 160px;
+  background: #1a1434;
+}
+
+#peervideo {
+  border: 2px solid var(--accent);
 }
 
 .yt-form {
