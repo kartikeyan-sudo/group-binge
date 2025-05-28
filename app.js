@@ -33,17 +33,22 @@ let localStream = null;
 let peers = {};
 let userConnections = {};
 let userCount = 1;
-let isSyncingVideo = false;
 let hasInitializedStream = false;
+let roomHostId = null; // Track room host
 
-// New sync control variables with modified values for better performance
-let lastSyncTime = 0; // Track when we last performed a sync
-let ignoreNextStateChange = false; // Flag to ignore state changes caused by our own sync
-const SYNC_COOLDOWN = 10000; // Minimum time between syncs (increased to 10 seconds)
-const TIME_SYNC_THRESHOLD = 5; // Only sync if time difference is greater than this (seconds) - using 5 seconds instead of 3
-let lastRemoteTime = 0; // Track the last remote time to detect loops
-let consecutiveSyncCount = 0; // Track how many times we've synced to similar positions
-const MAX_CONSECUTIVE_SYNCS = 3; // Maximum number of consecutive syncs before we temporarily disable syncing
+// Completely redesigned sync variables
+let isSyncingVideo = false;
+let ignoreStateChanges = false;
+let lastUpdateTime = 0;
+let lastKnownVideoTime = 0;
+let lastKnownPlayState = false;
+const SYNC_COOLDOWN = 10000; // 10 seconds between syncs
+const TIME_SYNC_THRESHOLD = 2; // 2 seconds difference to trigger sync
+const BUFFER_DURATION = 1000; // 1 second buffer for state changes
+let syncLoopBreaker = false; // Flag to break sync loops
+let consecutiveSyncAttempts = 0; // Track consecutive sync attempts
+const MAX_SYNC_ATTEMPTS = 2; // Max consecutive syncs before breaking the loop
+let lastSyncPosition = -1; // Track the last sync position
 
 // DOM Elements
 const splashScreen = document.getElementById('splashScreen');
@@ -171,6 +176,7 @@ function createRoom() {
     currentUser.name = name;
     currentRoom = generateRoomId();
     localUserName.innerText = name;
+    roomHostId = currentUser.id; // Set creator as host
     initializeRoom(true);
 }
 
@@ -194,12 +200,14 @@ function initializeRoom(isCreator) {
         roomRef.set({
             createdAt: firebase.database.ServerValue.TIMESTAMP,
             createdBy: currentUser.id,
+            hostId: currentUser.id, // Track room host
             activeUsers: { [currentUser.id]: currentUser.name },
             videoState: {
                 videoId: '',
                 isPlaying: false,
                 currentTime: 0,
-                lastUpdated: firebase.database.ServerValue.TIMESTAMP
+                timestamp: firebase.database.ServerValue.TIMESTAMP,
+                updatedBy: currentUser.id
             }
         }).then(() => {
             enterRoom();
@@ -210,6 +218,10 @@ function initializeRoom(isCreator) {
         // Check if room exists
         roomRef.once('value', snapshot => {
             if (snapshot.exists()) {
+                // Get the host ID when joining
+                if (snapshot.val().hostId) {
+                    roomHostId = snapshot.val().hostId;
+                }
                 enterRoom();
             } else {
                 showNotification('Room not found. Check the Room ID and try again.', 'error');
@@ -259,6 +271,16 @@ function enterRoom() {
                 syncBtn.innerHTML = '<i class="fas fa-sync"></i> Force Sync';
                 syncBtn.addEventListener('click', forceSyncWithRemote);
                 videoControls.appendChild(syncBtn);
+            }
+            
+            // If we're host, add a "Sync All" button
+            if (currentUser.id === roomHostId && videoControls && !document.getElementById('syncAllBtn')) {
+                const syncAllBtn = document.createElement('button');
+                syncAllBtn.id = 'syncAllBtn';
+                syncAllBtn.innerHTML = '<i class="fas fa-broadcast-tower"></i> Sync Everyone';
+                syncAllBtn.style.backgroundColor = '#f0b323'; // Gold color for host button
+                syncAllBtn.addEventListener('click', syncEveryone);
+                videoControls.appendChild(syncAllBtn);
             }
             
             showNotification('Successfully joined the room!', 'success');
@@ -316,6 +338,26 @@ function enterRoom() {
 }
 
 function setupFirebaseListeners() {
+    // Watch for room host changes
+    db.ref(`rooms/${currentRoom}/hostId`).on('value', snapshot => {
+        if (snapshot.exists()) {
+            roomHostId = snapshot.val();
+            
+            // If I'm the host and don't have the host button yet, add it
+            if (roomHostId === currentUser.id) {
+                const videoControls = document.querySelector('.video-controls');
+                if (videoControls && !document.getElementById('syncAllBtn')) {
+                    const syncAllBtn = document.createElement('button');
+                    syncAllBtn.id = 'syncAllBtn';
+                    syncAllBtn.innerHTML = '<i class="fas fa-broadcast-tower"></i> Sync Everyone';
+                    syncAllBtn.style.backgroundColor = '#f0b323'; // Gold color for host button
+                    syncAllBtn.addEventListener('click', syncEveryone);
+                    videoControls.appendChild(syncAllBtn);
+                }
+            }
+        }
+    });
+    
     // Watch for user changes (join/leave)
     db.ref(`rooms/${currentRoom}/activeUsers`).on('value', snapshot => {
         const users = snapshot.val() || {};
@@ -328,6 +370,21 @@ function setupFirebaseListeners() {
                 if (peers[peerId]) {
                     peers[peerId].destroy();
                     delete peers[peerId];
+                }
+            });
+        }
+        
+        // If the host left and we've been here longest, become the new host
+        if (!users[roomHostId] && userCount > 0) {
+            // Find the user with the earliest connection
+            db.ref(`rooms/${currentRoom}/connections`).orderByChild('timestamp').limitToFirst(1).once('value', snapshot => {
+                if (snapshot.exists()) {
+                    const firstUser = Object.keys(snapshot.val())[0];
+                    if (firstUser === currentUser.id) {
+                        // We're now the host
+                        db.ref(`rooms/${currentRoom}/hostId`).set(currentUser.id);
+                        showNotification('You are now the room host', 'info');
+                    }
                 }
             });
         }
@@ -364,53 +421,52 @@ function setupFirebaseListeners() {
         const videoState = snapshot.val();
         if (!videoState) return;
         
-        // Don't react to our own update
+        // Ignore if this is our own update
+        if (videoState.updatedBy === currentUser.id) {
+            debugLog('Ignoring my own video state update');
+            return;
+        }
+        
+        // Don't process updates while syncing or in cooldown
         if (isSyncingVideo) {
+            debugLog('Ignoring state change while syncing');
             return;
         }
         
-        // Avoid excessive syncs
+        // Don't process too many updates in rapid succession
         const now = Date.now();
-        if (now - lastSyncTime < SYNC_COOLDOWN) {
-            debugLog('Ignoring video state update during cooldown period');
+        if (now - lastUpdateTime < BUFFER_DURATION) {
+            debugLog('Ignoring update - too soon after previous update');
             return;
         }
         
-        // Apply the new state to our player
-        if (youtubePlayer && youtubePlayer.getPlayerState !== undefined) {
-            // If this update was from us, ignore it
-            if (videoState.updatedBy === currentUser.id) {
-                debugLog('Ignoring state update from self');
-                return;
+        // Special handling for sync signals from host
+        if (videoState.syncSignal) {
+            debugLog('Received sync signal from host');
+            handleHostSync(videoState);
+            return;
+        }
+        
+        // Handle regular video state updates
+        debugLog(`Received video state: playing=${videoState.isPlaying}, time=${videoState.currentTime.toFixed(2)}`);
+        handleVideoStateUpdate(videoState);
+    });
+    
+    // Watch for special sync commands
+    db.ref(`rooms/${currentRoom}/syncCommand`).on('value', snapshot => {
+        if (!snapshot.exists()) return;
+        
+        const command = snapshot.val();
+        
+        // Only process if the command is not from us and is fresh (within 5 seconds)
+        if (command.from !== currentUser.id && Date.now() - command.timestamp < 5000) {
+            if (command.type === 'requestSync' && currentUser.id === roomHostId) {
+                // We're the host and someone wants us to sync them
+                syncSpecificUser(command.from);
+            } else if (command.type === 'syncAll' && command.from === roomHostId) {
+                // The host is commanding everyone to sync
+                forceSyncWithRemote();
             }
-            
-            debugLog('Received video state update from Firebase:', videoState);
-            
-            // Check if we should apply this update
-            const currentTime = youtubePlayer.getCurrentTime();
-            const timeDiff = Math.abs(currentTime - videoState.currentTime);
-            
-            if (timeDiff > TIME_SYNC_THRESHOLD) {
-                debugLog(`Time significantly different (${timeDiff.toFixed(2)}s), syncing to remote`);
-                ignoreNextStateChange = true;
-                youtubePlayer.seekTo(videoState.currentTime, true);
-            }
-            
-            // Sync play state
-            if (videoState.isPlaying && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
-                debugLog('Remote is playing, but we are not - playing video');
-                ignoreNextStateChange = true;
-                youtubePlayer.playVideo();
-            } else if (!videoState.isPlaying && youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING) {
-                debugLog('Remote is paused, but we are playing - pausing video');
-                ignoreNextStateChange = true;
-                youtubePlayer.pauseVideo();
-            }
-            
-            lastSyncTime = now;
-            
-            // Update seekbar
-            updateSeekBar();
         }
     });
     
@@ -468,11 +524,18 @@ function leaveRoom() {
     db.ref(`rooms/${currentRoom}/videoState`).off();
     db.ref(`rooms/${currentRoom}/messages`).off();
     db.ref(`rooms/${currentRoom}/signals/${currentUser.id}`).off();
+    db.ref(`rooms/${currentRoom}/syncCommand`).off();
+    db.ref(`rooms/${currentRoom}/hostId`).off();
     
     // Reset global variables
     peers = {};
     userConnections = {};
     currentRoom = null;
+    roomHostId = null;
+    isSyncingVideo = false;
+    ignoreStateChanges = false;
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
     
     // Reset UI
     mainApp.classList.add('hidden');
@@ -596,7 +659,8 @@ function initializeYouTubePlayer() {
             'disablekb': 1,
             'rel': 0,
             'modestbranding': 1,
-            'origin': window.location.origin
+            'origin': window.location.origin,
+            'enablejsapi': 1
         },
         events: {
             'onReady': onPlayerReady,
@@ -616,185 +680,218 @@ function onPlayerReady(event) {
             debugLog(`Loading existing video: ${videoState.videoId} at time ${videoState.currentTime}`);
             
             // Load the existing video
-            ignoreNextStateChange = true;
+            ignoreStateChanges = true;
             youtubePlayer.loadVideoById(videoState.videoId, videoState.currentTime);
             
-            // Match play/pause state
-            if (videoState.isPlaying) {
-                youtubePlayer.playVideo();
-            } else {
-                youtubePlayer.pauseVideo();
-            }
-            
-            // Update the video ID input field
-            videoIdInput.value = videoState.videoId;
-            
-            // Initialize lastRemoteTime to avoid immediate sync issues
-            lastRemoteTime = videoState.currentTime;
+            // Match play/pause state after a short delay to ensure video loads
+            setTimeout(() => {
+                if (videoState.isPlaying) {
+                    youtubePlayer.playVideo();
+                } else {
+                    youtubePlayer.pauseVideo();
+                }
+                
+                // Update the video ID input field
+                videoIdInput.value = videoState.videoId;
+                
+                // Reset state tracking
+                lastKnownVideoTime = videoState.currentTime;
+                lastKnownPlayState = videoState.isPlaying;
+                
+                // Reset state change flag after loading
+                setTimeout(() => {
+                    ignoreStateChanges = false;
+                }, 2000);
+            }, 1000);
         }
     });
     
     // Start seeking bar update interval - this doesn't trigger syncs, just updates UI
     setInterval(updateSeekBar, 1000);
     
-    // Add a single consolidated sync checker with rate limiting
-    setInterval(checkForSyncNeeded, 5000); // Increased from 3000 to 5000ms
+    // Set up periodic sync check that's less aggressive (every 20 seconds)
+    setInterval(() => {
+        if (!youtubePlayer || !youtubePlayer.getCurrentTime || isSyncingVideo || syncLoopBreaker) return;
+        
+        // Only do lightweight sync verification
+        verifySync();
+    }, 20000);
 }
 
-// IMPROVED: Enhanced sync check function to better handle synchronization issues
-function checkForSyncNeeded() {
-    // Don't check if we're already syncing or if not enough time has passed
-    const now = Date.now();
-    if (isSyncingVideo || now - lastSyncTime < SYNC_COOLDOWN) return;
-    
+// Verify if we need to sync but don't actively sync
+function verifySync() {
     try {
         db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
             const remoteState = snapshot.val();
-            if (!remoteState || !youtubePlayer || !youtubePlayer.getCurrentTime) return;
+            if (!remoteState || !youtubePlayer) return;
             
-            // Don't sync if this update was from us
-            if (remoteState.updatedBy === currentUser.id && now - remoteState.lastUpdated < 10000) {
-                return;
-            }
-            
+            // Get local state
             const localTime = youtubePlayer.getCurrentTime();
             const localIsPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
-            const timeDiff = Math.abs(localTime - remoteState.currentTime);
             
-            // Check if we're in a sync loop by comparing with the last remote time
-            const remoteTimeDiff = Math.abs(remoteState.currentTime - lastRemoteTime);
-            if (remoteTimeDiff < 2) {
-                // The remote time is very similar to the last one we synced to
-                consecutiveSyncCount++;
-                debugLog(`Detected potential sync loop. Count: ${consecutiveSyncCount}`);
-                
-                if (consecutiveSyncCount >= MAX_CONSECUTIVE_SYNCS) {
-                    // We've synced to similar positions multiple times, this might be a loop
-                    debugLog(`Possible sync loop detected! Skipping this sync.`);
-                    // Reset the count after a while to allow future syncs
-                    setTimeout(() => { consecutiveSyncCount = 0; }, 30000);
-                    return;
-                }
-            } else {
-                // Remote time is different, reset the counter
-                consecutiveSyncCount = 0;
+            // Calculate time difference accounting for elapsed time
+            let adjustedRemoteTime = remoteState.currentTime;
+            if (remoteState.isPlaying) {
+                const secondsSinceUpdate = (Date.now() - remoteState.timestamp) / 1000;
+                adjustedRemoteTime += secondsSinceUpdate;
             }
             
-            let needsSync = false;
-            let syncReason = '';
+            const timeDiff = Math.abs(localTime - adjustedRemoteTime);
             
-            // First check play state - most important
-            if (remoteState.isPlaying !== localIsPlaying) {
-                needsSync = true;
-                syncReason = `Play state mismatch: Remote=${remoteState.isPlaying}, Local=${localIsPlaying}`;
-            }
-            
-            // Then check time if both are playing or if time difference is very large
-            else if (timeDiff > TIME_SYNC_THRESHOLD && 
-                     (remoteState.isPlaying && localIsPlaying || timeDiff > 30)) {
-                
-                const duration = youtubePlayer.getDuration();
-                
-                // Enhanced check to prevent sync loops:
-                // 1. Verify we're not at video boundaries
-                // 2. Make sure both times are reasonable
-                // 3. Ensure we're not constantly syncing to nearly the same position
-                if (localTime > 1 && localTime < duration - 1 && 
-                    remoteState.currentTime > 1 && remoteState.currentTime < duration - 1) {
-                    
-                    needsSync = true;
-                    syncReason = `Time difference: ${timeDiff.toFixed(2)}s (Local: ${localTime.toFixed(2)}, Remote: ${remoteState.currentTime.toFixed(2)})`;
-                    
-                    // When times are dramatically different, log it
-                    if (timeDiff > 30) {
-                        debugLog(`Large time difference detected: ${timeDiff.toFixed(2)}s`);
-                    }
-                }
-            }
-            
-            if (needsSync) {
-                debugLog(`Sync needed: ${syncReason}`);
-                // Store the remote time before syncing to check for loops next time
-                lastRemoteTime = remoteState.currentTime;
-                performSync(remoteState);
+            // If we're significantly out of sync, notify the user
+            if ((remoteState.isPlaying !== localIsPlaying) || (timeDiff > TIME_SYNC_THRESHOLD * 4)) {
+                debugLog(`Out of sync detected: time diff=${timeDiff.toFixed(2)}s, play state=${localIsPlaying} vs ${remoteState.isPlaying}`);
+                showNotification('Video out of sync. Click "Force Sync" to synchronize with the room.', 'info', 4000);
             }
         });
     } catch (err) {
-        debugLog('Error in sync check:', err);
+        debugLog('Error in sync verification:', err);
     }
 }
 
-// IMPROVED: Enhanced sync function to prevent race conditions and cascading updates
-function performSync(remoteState) {
-    lastSyncTime = Date.now();
-    isSyncingVideo = true;
-    ignoreNextStateChange = true;
+// Handle video state updates from Firebase
+function handleVideoStateUpdate(videoState) {
+    // If we're currently syncing, ignore this update
+    if (isSyncingVideo) return;
     
-    debugLog(`Performing sync to time ${remoteState.currentTime.toFixed(2)}, playing=${remoteState.isPlaying}`);
-    
-    // First sync the time if needed but only if the difference is significant
-    const timeDiff = Math.abs(youtubePlayer.getCurrentTime() - remoteState.currentTime);
-    if (timeDiff > TIME_SYNC_THRESHOLD) {
-        youtubePlayer.seekTo(remoteState.currentTime, true);
+    // Check if this is the same position we recently synced to
+    if (Math.abs(videoState.currentTime - lastSyncPosition) < 1 && 
+        Date.now() - lastUpdateTime < 10000) {
+        consecutiveSyncAttempts++;
+        debugLog(`Detected potential sync loop, attempt ${consecutiveSyncAttempts}`);
         
-        // Add a small delay before changing play state to allow the seek to complete
+        // If we detect a sync loop, break out of it
+        if (consecutiveSyncAttempts >= MAX_SYNC_ATTEMPTS) {
+            debugLog('Breaking sync loop');
+            syncLoopBreaker = true;
+            
+            // Reset after a while
+            setTimeout(() => {
+                syncLoopBreaker = false;
+                consecutiveSyncAttempts = 0;
+            }, 30000);
+            
+            return;
+        }
+    } else {
+        consecutiveSyncAttempts = 0;
+    }
+    
+    // Record this sync attempt
+    lastUpdateTime = Date.now();
+    lastSyncPosition = videoState.currentTime;
+    
+    // If video ID is different, load the new video
+    if (youtubePlayer.getVideoData && youtubePlayer.getVideoData().video_id !== videoState.videoId) {
+        loadSpecificVideo(videoState.videoId, videoState.currentTime, videoState.isPlaying);
+        return;
+    }
+    
+    // Calculate adjusted time based on elapsed time since update
+    let adjustedTime = videoState.currentTime;
+    if (videoState.isPlaying && videoState.timestamp) {
+        const secondsSinceUpdate = (Date.now() - videoState.timestamp) / 1000;
+        adjustedTime += secondsSinceUpdate;
+    }
+    
+    // Set syncing flag
+    isSyncingVideo = true;
+    
+    debugLog(`Syncing to video state: time=${adjustedTime.toFixed(2)}, playing=${videoState.isPlaying}`);
+    
+    // Get local state
+    const localTime = youtubePlayer.getCurrentTime();
+    const timeDiff = Math.abs(localTime - adjustedTime);
+    
+    // First handle time synchronization if needed
+    if (timeDiff > TIME_SYNC_THRESHOLD) {
+        youtubePlayer.seekTo(adjustedTime, true);
+        
+        // After seeking, handle play state after a delay
         setTimeout(() => {
-            // Then sync the play state
-            if (remoteState.isPlaying && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
-                youtubePlayer.playVideo();
-            } else if (!remoteState.isPlaying && youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING) {
-                youtubePlayer.pauseVideo();
-            }
+            syncPlayState(videoState.isPlaying);
+            
+            // Reset syncing flag after a delay
+            setTimeout(() => {
+                isSyncingVideo = false;
+            }, 1000);
         }, 500);
     } else {
-        // Just sync the play state if time is close enough
-        if (remoteState.isPlaying && youtubePlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
-            youtubePlayer.playVideo();
-        } else if (!remoteState.isPlaying && youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING) {
-            youtubePlayer.pauseVideo();
-        }
+        // Just sync play state if time is close enough
+        syncPlayState(videoState.isPlaying);
+        
+        // Reset syncing flag faster for minor syncs
+        setTimeout(() => {
+            isSyncingVideo = false;
+        }, 500);
     }
-    
-    // Reset sync flags after sufficient delays
-    setTimeout(() => {
-        isSyncingVideo = false;
-    }, 2000);
-    
-    setTimeout(() => {
-        ignoreNextStateChange = false;
-    }, 2500);
 }
 
+// Sync play/pause state
+function syncPlayState(shouldPlay) {
+    try {
+        const playerState = youtubePlayer.getPlayerState();
+        
+        if (shouldPlay && playerState !== YT.PlayerState.PLAYING) {
+            youtubePlayer.playVideo();
+        } else if (!shouldPlay && playerState === YT.PlayerState.PLAYING) {
+            youtubePlayer.pauseVideo();
+        }
+        
+        // Update local state tracking
+        lastKnownPlayState = shouldPlay;
+    } catch (err) {
+        debugLog('Error syncing play state:', err);
+    }
+}
+
+// Special handling for host sync signals
+function handleHostSync(syncState) {
+    // This is a high-priority sync from the host
+    debugLog('Processing host sync signal');
+    
+    // Reset any sync loop protection
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
+    
+    // Force a sync using the most direct method
+    forceSyncWithReload(syncState);
+}
+
+// Handle player state changes from YouTube
 function onPlayerStateChange(event) {
-    // Don't process if this state change was triggered by our own sync
-    if (ignoreNextStateChange) {
-        debugLog('Ignoring state change caused by sync');
-        return;  // Don't reset the flag here to allow multiple state changes during sync
+    // Ignore if we're currently syncing
+    if (isSyncingVideo) {
+        debugLog('Ignoring state change during sync');
+        return;
     }
     
-    // Don't update if a sync was performed too recently
-    const now = Date.now();
-    if (now - lastSyncTime < SYNC_COOLDOWN) {
-        debugLog('Ignoring state change during sync cooldown period');
+    // Don't update if we recently received an update
+    if (Date.now() - lastUpdateTime < BUFFER_DURATION) {
+        debugLog('Ignoring state change during buffer period');
         return;
     }
     
     switch (event.data) {
         case YT.PlayerState.PLAYING:
-            debugLog('Player state change: PLAYING');
-            updateVideoState(true, youtubePlayer.getCurrentTime());
+            debugLog('Local player state: PLAYING');
+            lastKnownPlayState = true;
+            lastKnownVideoTime = youtubePlayer.getCurrentTime();
+            pushVideoState(true, lastKnownVideoTime);
             break;
+            
         case YT.PlayerState.PAUSED:
-            debugLog('Player state change: PAUSED');
-            updateVideoState(false, youtubePlayer.getCurrentTime());
+            debugLog('Local player state: PAUSED');
+            lastKnownPlayState = false;
+            lastKnownVideoTime = youtubePlayer.getCurrentTime();
+            pushVideoState(false, lastKnownVideoTime);
             break;
+            
         case YT.PlayerState.ENDED:
-            debugLog('Player state change: ENDED');
-            updateVideoState(false, 0);
-            break;
-        case YT.PlayerState.BUFFERING:
-            debugLog('Player state change: BUFFERING');
-            // Don't update state during buffering
+            debugLog('Local player state: ENDED');
+            lastKnownPlayState = false;
+            lastKnownVideoTime = 0;
+            pushVideoState(false, 0);
             break;
     }
 }
@@ -825,25 +922,23 @@ function loadVideo() {
     // Show loading notification
     showNotification('Loading video...', 'info', 2000);
     
-    // Reset sync indicators when loading a new video
-    lastRemoteTime = 0; 
-    consecutiveSyncCount = 0;
+    // Reset sync loop tracking
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
     
-    // Set flags to prevent sync loops
-    ignoreNextStateChange = true;
-    lastSyncTime = Date.now();
+    // Set flags to prevent update loops
+    isSyncingVideo = true;
     
     // Load the video in YouTube player
     youtubePlayer.loadVideoById(videoId);
     youtubePlayer.pauseVideo(); // Start paused to allow sync
     
     // Update Firebase with new video
-    isSyncingVideo = true;
     db.ref(`rooms/${currentRoom}/videoState`).update({
         videoId: videoId,
         isPlaying: false,
         currentTime: 0,
-        lastUpdated: firebase.database.ServerValue.TIMESTAMP,
+        timestamp: firebase.database.ServerValue.TIMESTAMP,
         updatedBy: currentUser.id
     }).then(() => {
         showNotification('Video loaded successfully', 'success');
@@ -856,31 +951,142 @@ function loadVideo() {
             timestamp: firebase.database.ServerValue.TIMESTAMP
         };
         db.ref(`rooms/${currentRoom}/messages`).push(message);
+        
+        // Update local state tracking
+        lastKnownVideoTime = 0;
+        lastKnownPlayState = false;
+        lastUpdateTime = Date.now();
+        
+        // Reset syncing flag after a delay
+        setTimeout(() => {
+            isSyncingVideo = false;
+        }, 2000);
     }).catch(error => {
         showNotification('Error loading video', 'error');
         debugLog('Error updating video state:', error);
+        isSyncingVideo = false;
+    });
+}
+
+// Load a specific video (for syncing with remote)
+function loadSpecificVideo(videoId, startTime = 0, autoplay = false) {
+    // Reset sync loop tracking
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
+    
+    // Set flags to prevent update loops
+    isSyncingVideo = true;
+    
+    debugLog(`Loading video: ${videoId} at ${startTime.toFixed(2)}, playing=${autoplay}`);
+    
+    // Update the input field
+    videoIdInput.value = videoId;
+    
+    // Load the video
+    youtubePlayer.loadVideoById({
+        videoId: videoId,
+        startSeconds: startTime
     });
     
-    // Reset sync flags after a delay
+    // Set play state after a short delay
     setTimeout(() => {
-        isSyncingVideo = false;
-        ignoreNextStateChange = false;
-    }, 3000); // Extended delay for new video loading
+        if (autoplay) {
+            youtubePlayer.playVideo();
+        } else {
+            youtubePlayer.pauseVideo();
+        }
+        
+        // Update local tracking
+        lastKnownVideoTime = startTime;
+        lastKnownPlayState = autoplay;
+        lastUpdateTime = Date.now();
+        
+        // Reset syncing flag after another delay
+        setTimeout(() => {
+            isSyncingVideo = false;
+        }, 1000);
+        
+        showNotification('New video loaded', 'info');
+    }, 1000);
+}
+
+// Force reload and sync (for breaking loops)
+function forceSyncWithReload(remoteState) {
+    // Fetch current video state if not provided
+    if (!remoteState) {
+        db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
+            const state = snapshot.val();
+            if (state) {
+                performForcedSync(state);
+            }
+        });
+        return;
+    }
+    
+    performForcedSync(remoteState);
+}
+
+// Actual implementation of forced sync
+function performForcedSync(remoteState) {
+    debugLog('Performing forced sync');
+    showNotification('Synchronizing with room...', 'info');
+    
+    // Set flags
+    isSyncingVideo = true;
+    
+    // Reset sync loop tracking
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
+    
+    // Get current video ID
+    const videoId = remoteState.videoId;
+    
+    // Calculate adjusted current time
+    let adjustedTime = remoteState.currentTime;
+    if (remoteState.isPlaying && remoteState.timestamp) {
+        const secondsSinceUpdate = (Date.now() - remoteState.timestamp) / 1000;
+        adjustedTime += secondsSinceUpdate;
+    }
+    
+    // Reload the video completely
+    youtubePlayer.loadVideoById({
+        videoId: videoId,
+        startSeconds: adjustedTime
+    });
+    
+    // Update the input field
+    videoIdInput.value = videoId;
+    
+    // Set playback state after a delay to ensure video loads
+    setTimeout(() => {
+        if (remoteState.isPlaying) {
+            youtubePlayer.playVideo();
+        } else {
+            youtubePlayer.pauseVideo();
+        }
+        
+        // Update local tracking
+        lastKnownVideoTime = adjustedTime;
+        lastKnownPlayState = remoteState.isPlaying;
+        lastUpdateTime = Date.now();
+        lastSyncPosition = adjustedTime;
+        
+        showNotification('Synchronized with room', 'success');
+        
+        // Reset syncing flag after a delay
+        setTimeout(() => {
+            isSyncingVideo = false;
+        }, 1000);
+    }, 1000);
 }
 
 function playVideo() {
     if (!youtubePlayer || !youtubePlayer.playVideo) return;
-    
-    ignoreNextStateChange = true;
-    lastSyncTime = Date.now();
     youtubePlayer.playVideo();
 }
 
 function pauseVideo() {
     if (!youtubePlayer || !youtubePlayer.pauseVideo) return;
-    
-    ignoreNextStateChange = true;
-    lastSyncTime = Date.now();
     youtubePlayer.pauseVideo();
 }
 
@@ -891,21 +1097,29 @@ function handleSeek() {
     const duration = youtubePlayer.getDuration();
     const newTime = (duration * seekValue) / 100;
     
-    // Set flags to prevent echo effects
-    ignoreNextStateChange = true;
-    lastSyncTime = Date.now();
+    // Set syncing flag to prevent update loops
+    isSyncingVideo = true;
     
-    // Reset loop detection when user manually seeks
-    lastRemoteTime = newTime;
-    consecutiveSyncCount = 0;
+    // Reset sync loop tracking
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
     
     // Perform the seek
     youtubePlayer.seekTo(newTime, true);
     
-    // Wait a bit to update Firebase to make sure the seekTo has completed
+    // Update local tracking
+    lastKnownVideoTime = newTime;
+    
+    // Wait a bit to update Firebase
     setTimeout(() => {
-        updateVideoState(youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING, newTime);
-    }, 300);
+        const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
+        pushVideoState(isPlaying, newTime);
+        
+        // Reset syncing flag
+        setTimeout(() => {
+            isSyncingVideo = false;
+        }, 500);
+    }, 200);
 }
 
 function updateSeekBar() {
@@ -927,46 +1141,110 @@ function updateSeekBar() {
     }
 }
 
-function updateVideoState(isPlaying, currentTime) {
+// Push video state to Firebase
+function pushVideoState(isPlaying, currentTime) {
     if (!currentRoom) return;
     
-    // Update with a timestamp so clients can determine which update is newest
-    lastSyncTime = Date.now();
-    isSyncingVideo = true;
+    lastUpdateTime = Date.now();
     
-    debugLog(`Updating video state: playing=${isPlaying}, time=${currentTime.toFixed(2)}`);
+    debugLog(`Pushing state: playing=${isPlaying}, time=${currentTime.toFixed(2)}`);
     
     // Update Firebase with current state
     db.ref(`rooms/${currentRoom}/videoState`).update({
         isPlaying: isPlaying,
         currentTime: currentTime,
-        lastUpdated: firebase.database.ServerValue.TIMESTAMP,
-        updatedBy: currentUser.id  // Track who made this update
+        timestamp: firebase.database.ServerValue.TIMESTAMP,
+        updatedBy: currentUser.id
     }).catch(err => {
         debugLog('Error updating video state:', err);
     });
-    
-    // Reset the sync flag after a delay
-    setTimeout(() => {
-        isSyncingVideo = false;
-    }, 2000);
 }
 
-// Force sync button implementation with enhanced logic
+// Force sync button implementation (user-triggered)
 function forceSyncWithRemote() {
-    db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
-        const remoteState = snapshot.val();
-        if (!remoteState) return;
+    // If we're the host, use our local state as the source of truth
+    if (currentUser.id === roomHostId) {
+        const localTime = youtubePlayer.getCurrentTime();
+        const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
         
-        debugLog('Manual sync requested');
-        showNotification('Synchronizing with room...', 'info');
+        showNotification('You are the host, using local playback state as reference', 'info');
         
-        // Reset loop detection counters on manual sync
-        lastRemoteTime = remoteState.currentTime;
-        consecutiveSyncCount = 0;
+        // Update Firebase with a special sync flag
+        db.ref(`rooms/${currentRoom}/videoState`).update({
+            isPlaying: isPlaying,
+            currentTime: localTime,
+            timestamp: firebase.database.ServerValue.TIMESTAMP,
+            updatedBy: currentUser.id,
+            syncSignal: true  // Special flag to indicate this is a sync command
+        });
         
-        performSync(remoteState);
-        showNotification('Synchronized with room', 'success', 2000);
+        return;
+    }
+    
+    // If we're not the host, request a sync from Firebase
+    showNotification('Requesting sync from room...', 'info');
+    
+    // Reset sync loop tracking
+    syncLoopBreaker = false;
+    consecutiveSyncAttempts = 0;
+    
+    // Use the more reliable full sync method
+    forceSyncWithReload();
+    
+    // Also request a sync from the host
+    if (roomHostId) {
+        db.ref(`rooms/${currentRoom}/syncCommand`).set({
+            type: 'requestSync',
+            from: currentUser.id,
+            timestamp: Date.now()
+        });
+    }
+}
+
+// Host function: sync everyone in the room
+function syncEveryone() {
+    if (currentUser.id !== roomHostId) {
+        debugLog('Only the host can sync everyone');
+        return;
+    }
+    
+    showNotification('Syncing everyone to your playback position...', 'success');
+    
+    const localTime = youtubePlayer.getCurrentTime();
+    const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
+    
+    // Update video state with a sync signal
+    db.ref(`rooms/${currentRoom}/videoState`).update({
+        isPlaying: isPlaying,
+        currentTime: localTime,
+        timestamp: firebase.database.ServerValue.TIMESTAMP,
+        updatedBy: currentUser.id,
+        syncSignal: true
+    });
+    
+    // Also send a sync command
+    db.ref(`rooms/${currentRoom}/syncCommand`).set({
+        type: 'syncAll',
+        from: currentUser.id,
+        timestamp: Date.now()
+    });
+}
+
+// Host function: sync a specific user
+function syncSpecificUser(userId) {
+    if (currentUser.id !== roomHostId) return;
+    
+    debugLog(`Syncing user ${userId} to my position`);
+    
+    const localTime = youtubePlayer.getCurrentTime();
+    const isPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
+    
+    // Send a direct sync signal to the user
+    db.ref(`rooms/${currentRoom}/users/${userId}/directSync`).set({
+        isPlaying: isPlaying,
+        currentTime: localTime,
+        timestamp: firebase.database.ServerValue.TIMESTAMP,
+        from: currentUser.id
     });
 }
 
@@ -1215,6 +1493,22 @@ function addPeerVideo(peerId, peerName, stream) {
         peerVideoContainer.appendChild(peerVideo);
         peerVideoContainer.appendChild(overlay);
         peersContainer.appendChild(peerVideoContainer);
+        
+        // If this is the host, add a visual indicator
+        if (peerId === roomHostId) {
+            const hostBadge = document.createElement('div');
+            hostBadge.className = 'host-badge';
+            hostBadge.innerHTML = '<i class="fas fa-crown"></i> Host';
+            hostBadge.style.position = 'absolute';
+            hostBadge.style.top = '5px';
+            hostBadge.style.right = '5px';
+            hostBadge.style.background = 'rgba(240, 179, 35, 0.8)';
+            hostBadge.style.color = '#fff';
+            hostBadge.style.padding = '2px 6px';
+            hostBadge.style.borderRadius = '3px';
+            hostBadge.style.fontSize = '0.7rem';
+            peerVideoContainer.appendChild(hostBadge);
+        }
         
         // Set the stream with play handling
         try {
