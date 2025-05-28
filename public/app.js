@@ -1,13 +1,13 @@
 // ----- Firebase Config -----
-// Replace below with your Firebase project settings:
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  databaseURL: "https://YOUR_PROJECT_ID.firebaseio.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyAuPkckM3g-LczCpXzbRKTf506dSA0VQuE",
+  authDomain: "bingebase-c9caf.firebaseapp.com",
+  databaseURL: "https://bingebase-c9caf-default-rtdb.firebaseio.com/",
+  projectId: "bingebase-c9caf",
+  storageBucket: "bingebase-c9caf.appspot.com",
+  messagingSenderId: "634535708109",
+  appId: "1:634535708109:web:77a69f32874bb8f4083084",
+  measurementId: "G-V27LVY4HRH"
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
