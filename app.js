@@ -1449,11 +1449,16 @@ function createPeerConnection(userData) {
     
     debugLog(`Creating connection with peer: ${userData.name} (${peerId})`);
     
+    // Check if localStream has valid tracks before using it
+    const hasValidTracks = localStream && 
+                          (localStream.getVideoTracks().length > 0 || 
+                           localStream.getAudioTracks().length > 0);
+    
     // Create a new peer connection with explicit configuration
     const peer = new SimplePeer({
         initiator: currentUser.id > peerId, // Deterministic initiator based on ID comparison
         trickle: true, // Enable trickle ICE for better connectivity
-        stream: localStream,
+        stream: hasValidTracks ? localStream : null, // Only pass stream if it has tracks
         config: { // Explicit STUN/TURN server configuration
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -1465,10 +1470,109 @@ function createPeerConnection(userData) {
                     urls: 'turn:numb.viagenie.ca',
                     username: 'webrtc@live.com',
                     credential: 'muazkh'
+                },
+                { // Add backup TURN server
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
                 }
             ]
         }
     });
+    
+    // Store the peer connection
+    peers[peerId] = peer;
+    userConnections[peerId] = userData;
+    
+    // Create video container in advance
+    createPeerVideoContainer(peerId, userData.name);
+    
+    // Handle signals (WebRTC negotiation)
+    peer.on('signal', signal => {
+        // More granular signal handling
+        let signalType = 'ice-candidate';
+        if (signal.type === 'offer' || signal.type === 'answer') {
+            signalType = signal.type;
+        } else if (signal.sdp) {
+            signalType = 'offer';
+        }
+        
+        debugLog(`Sending ${signalType} signal to peer ${userData.name}`);
+        
+        // Send signal to Firebase
+        db.ref(`rooms/${currentRoom}/signals/${peerId}`).push({
+            from: currentUser.id,
+            type: signalType,
+            data: signal,
+            timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+    });
+    
+    // Handle incoming stream
+    peer.on('stream', stream => {
+        debugLog(`Received stream from peer ${userData.name}`, stream);
+        
+        // Update the peer's video element with the stream
+        updatePeerStream(peerId, userData.name, stream);
+    });
+    
+    // Handle connection close
+    peer.on('close', () => {
+        removePeerConnection(peerId);
+    });
+    
+    // Handle errors with improved reconnection logic
+    peer.on('error', err => {
+        debugLog(`WebRTC error with peer ${userData.name}:`, err);
+        showNotification(`Connection error with ${userData.name}`, 'error');
+        
+        // Show reconnecting indicator in the UI
+        const peerVideoContainer = document.getElementById(`peer-${peerId}`);
+        if (peerVideoContainer) {
+            const reconnectingIndicator = document.createElement('div');
+            reconnectingIndicator.className = 'reconnecting-indicator';
+            reconnectingIndicator.innerText = 'Reconnecting...';
+            reconnectingIndicator.style.position = 'absolute';
+            reconnectingIndicator.style.bottom = '40px';
+            reconnectingIndicator.style.left = '50%';
+            reconnectingIndicator.style.transform = 'translateX(-50%)';
+            reconnectingIndicator.style.background = 'rgba(255, 69, 85, 0.7)';
+            reconnectingIndicator.style.padding = '3px 8px';
+            reconnectingIndicator.style.borderRadius = '3px';
+            
+            // Remove existing indicator if present
+            const existingIndicator = peerVideoContainer.querySelector('.reconnecting-indicator');
+            if (existingIndicator) existingIndicator.remove();
+            
+            peerVideoContainer.appendChild(reconnectingIndicator);
+        }
+        
+        // Attempt reconnection after a delay with exponential backoff
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        
+        function attemptReconnect() {
+            if (reconnectAttempts >= maxReconnectAttempts || !userConnections[peerId]) return;
+            
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff with 30s max
+            
+            setTimeout(() => {
+                debugLog(`Attempting to reconnect with ${userData.name} (attempt ${reconnectAttempts})`);
+                removePeerConnection(peerId);
+                createPeerConnection(userData);
+            }, delay);
+        }
+        
+        attemptReconnect();
+    });
+    
+    // Debug connection state
+    peer.on('connect', () => {
+        debugLog(`Connected to peer ${userData.name}`);
+        showNotification(`Connected to ${userData.name}`, 'success', 2000);
+    });
+}
     
     // Store the peer connection
     peers[peerId] = peer;
@@ -1626,10 +1730,37 @@ function updatePeerStream(peerId, peerName, stream) {
         return;
     }
     
+    // Check if stream has video tracks
+    const hasVideoTracks = stream && stream.getVideoTracks().length > 0;
+    
     // Set the stream
     try {
         debugLog(`Setting stream for peer ${peerName}`);
         peerVideo.srcObject = stream;
+        
+        // Add placeholder background if no video tracks
+        if (!hasVideoTracks) {
+            peerVideo.style.backgroundColor = "#1a2235";
+            
+            // Add a camera-off icon
+            const noVideoIndicator = document.createElement('div');
+            noVideoIndicator.innerHTML = '<i class="fas fa-video-slash"></i>';
+            noVideoIndicator.className = 'no-video-indicator';
+            noVideoIndicator.style.position = 'absolute';
+            noVideoIndicator.style.top = '50%';
+            noVideoIndicator.style.left = '50%';
+            noVideoIndicator.style.transform = 'translate(-50%, -50%)';
+            noVideoIndicator.style.fontSize = '2rem';
+            noVideoIndicator.style.color = 'rgba(255,255,255,0.5)';
+            
+            // Remove any existing indicator first
+            const existingIndicator = peerVideoContainer.querySelector('.no-video-indicator');
+            if (existingIndicator) {
+                existingIndicator.remove();
+            }
+            
+            peerVideoContainer.appendChild(noVideoIndicator);
+        }
         
         // Attempt to play the video
         const playPromise = peerVideo.play();
@@ -1687,7 +1818,6 @@ function updatePeerStream(peerId, peerName, stream) {
         debugLog(`Error setting stream for peer ${peerName}:`, err);
     }
 }
-
 function updatePeerMediaState(userData) {
     if (!userData) return;
     
@@ -1852,5 +1982,103 @@ if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
         }, function(err) {
             debugLog('ServiceWorker registration failed: ', err);
         });
+    });
+}
+
+const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    // Better to use your own TURN server or a more reliable service
+    { 
+        urls: 'turn:numb.viagenie.ca',
+        username: 'webrtc@live.com',
+        credential: 'muazkh'
+    },
+    // Add more TURN servers as backup
+    {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    }
+];
+
+peer.on('error', err => {
+    debugLog(`WebRTC error with peer ${userData.name}:`, err);
+    showNotification(`Connection error with ${userData.name}`, 'error');
+    
+    // Show reconnecting indicator in the UI
+    const peerVideoContainer = document.getElementById(`peer-${peerId}`);
+    if (peerVideoContainer) {
+        const reconnectingIndicator = document.createElement('div');
+        reconnectingIndicator.className = 'reconnecting-indicator';
+        reconnectingIndicator.innerText = 'Reconnecting...';
+        reconnectingIndicator.style.position = 'absolute';
+        reconnectingIndicator.style.bottom = '40px';
+        reconnectingIndicator.style.left = '50%';
+        reconnectingIndicator.style.transform = 'translateX(-50%)';
+        reconnectingIndicator.style.background = 'rgba(255, 69, 85, 0.7)';
+        reconnectingIndicator.style.padding = '3px 8px';
+        reconnectingIndicator.style.borderRadius = '3px';
+        
+        // Remove existing indicator if present
+        const existingIndicator = peerVideoContainer.querySelector('.reconnecting-indicator');
+        if (existingIndicator) existingIndicator.remove();
+        
+        peerVideoContainer.appendChild(reconnectingIndicator);
+    }
+    
+    // Attempt reconnection after a delay with exponential backoff
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    
+    function attemptReconnect() {
+        if (reconnectAttempts >= maxReconnectAttempts || !userConnections[peerId]) return;
+        
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff with 30s max
+        
+        setTimeout(() => {
+            debugLog(`Attempting to reconnect with ${userData.name} (attempt ${reconnectAttempts})`);
+            removePeerConnection(peerId);
+            createPeerConnection(userData);
+        }, delay);
+    }
+    
+    attemptReconnect();
+});
+
+// Add this function to help with debugging
+function logMediaState() {
+    debugLog("Media State Debug:");
+    
+    // Log local stream status
+    debugLog(`- Local stream exists: ${localStream !== null}`);
+    if (localStream) {
+        debugLog(`- Local video tracks: ${localStream.getVideoTracks().length}`);
+        debugLog(`- Local audio tracks: ${localStream.getAudioTracks().length}`);
+        
+        const videoTrack = localStream.getVideoTracks()[0];
+        if (videoTrack) {
+            debugLog(`- Video track enabled: ${videoTrack.enabled}`);
+            debugLog(`- Video track settings: ${JSON.stringify(videoTrack.getSettings())}`);
+        }
+    }
+    
+    // Log peer connections
+    debugLog(`- Peer connections count: ${Object.keys(peers).length}`);
+    Object.keys(peers).forEach(peerId => {
+        const peerConnected = peers[peerId] && peers[peerId]._connected;
+        debugLog(`  > Peer ${peerId}: ${peerConnected ? 'Connected' : 'Not connected'}`);
+    });
+    
+    // Check video elements
+    const videoElements = document.querySelectorAll('video');
+    debugLog(`- Video elements on page: ${videoElements.length}`);
+    videoElements.forEach((video, i) => {
+        const hasSource = video.srcObject !== null;
+        debugLog(`  > Video ${i} (${video.id}): Has source: ${hasSource}, Size: ${video.videoWidth}x${video.videoHeight}`);
     });
 }
