@@ -35,7 +35,6 @@ let userConnections = {};
 let userCount = 1;
 let hasInitializedStream = false;
 let roomHostId = null; // Track room host
-let peerVideosInitialized = {}; // Track which peer videos have been initialized
 
 // Completely redesigned sync variables
 let isSyncingVideo = false;
@@ -50,7 +49,6 @@ let syncLoopBreaker = false; // Flag to break sync loops
 let consecutiveSyncAttempts = 0; // Track consecutive sync attempts
 const MAX_SYNC_ATTEMPTS = 2; // Max consecutive syncs before breaking the loop
 let lastSyncPosition = -1; // Track the last sync position
-let initialSyncAttempted = false; // Track if we've attempted initial sync
 
 // DOM Elements
 const splashScreen = document.getElementById('splashScreen');
@@ -348,11 +346,6 @@ function enterRoom() {
                 });
                 connectionRef.onDisconnect().remove();
                 
-                // Request sync for newly joining user
-                setTimeout(() => {
-                    forceSyncWithRemote();
-                }, 2000);
-                
                 showNotification('Joined without camera/microphone', 'info');
             }
         });
@@ -491,7 +484,7 @@ function setupFirebaseListeners() {
         }
     });
     
-    // NEW: Special handling for direct user syncs
+    // Watch for direct user syncs
     db.ref(`rooms/${currentRoom}/users/${currentUser.id}/directSync`).on('value', snapshot => {
         if (!snapshot.exists()) return;
         
@@ -587,14 +580,12 @@ function leaveRoom() {
     // Reset global variables
     peers = {};
     userConnections = {};
-    peerVideosInitialized = {};
     currentRoom = null;
     roomHostId = null;
     isSyncingVideo = false;
     ignoreStateChanges = false;
     syncLoopBreaker = false;
     consecutiveSyncAttempts = 0;
-    initialSyncAttempted = false;
     
     // Reset UI
     mainApp.classList.add('hidden');
@@ -732,31 +723,11 @@ function initializeYouTubePlayer() {
 function onPlayerReady(event) {
     debugLog('YouTube player ready');
     
-    // FIX: Implement robust initial video loading for new users joining
-    fetchAndApplyRoomVideoState();
-    
-    // Start seeking bar update interval - this doesn't trigger syncs, just updates UI
-    setInterval(updateSeekBar, 1000);
-    
-    // Set up periodic sync check that's less aggressive (every 20 seconds)
-    setInterval(() => {
-        if (!youtubePlayer || !youtubePlayer.getCurrentTime || isSyncingVideo || syncLoopBreaker) return;
-        
-        // Only do lightweight sync verification
-        verifySync();
-    }, 20000);
-}
-
-// FIX: New function to fetch and apply video state robustly for new users
-function fetchAndApplyRoomVideoState() {
+    // Check if there's already a video loaded in the room
     db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
         const videoState = snapshot.val();
         if (videoState && videoState.videoId) {
-            debugLog(`Found existing video: ${videoState.videoId} at time ${videoState.currentTime}`);
-            
-            // Set flag to prevent update loops
-            isSyncingVideo = true;
-            initialSyncAttempted = true;
+            debugLog(`Loading existing video: ${videoState.videoId} at time ${videoState.currentTime}`);
             
             // Calculate adjusted time based on elapsed time since update
             let adjustedTime = videoState.currentTime;
@@ -765,8 +736,11 @@ function fetchAndApplyRoomVideoState() {
                 adjustedTime += secondsSinceUpdate;
             }
             
-            // Load the video completely from scratch with the current state
-            youtubePlayer.loadVideoById({
+            // Set flag to prevent update loops
+            isSyncingVideo = true;
+            
+            // Load the existing video
+            youtubePlayer.cueVideoById({
                 videoId: videoState.videoId,
                 startSeconds: adjustedTime
             });
@@ -776,6 +750,9 @@ function fetchAndApplyRoomVideoState() {
             
             // Apply play/pause state after video loads
             setTimeout(() => {
+                // Make sure we're at the right position
+                youtubePlayer.seekTo(adjustedTime, true);
+                
                 if (videoState.isPlaying) {
                     youtubePlayer.playVideo();
                 } else {
@@ -795,12 +772,19 @@ function fetchAndApplyRoomVideoState() {
                     isSyncingVideo = false;
                 }, 2000);
             }, 1000);
-        } else {
-            // No video is currently loaded in the room
-            initialSyncAttempted = true;
-            debugLog('No video currently in room');
         }
     });
+    
+    // Start seeking bar update interval - this doesn't trigger syncs, just updates UI
+    setInterval(updateSeekBar, 1000);
+    
+    // Set up periodic sync check that's less aggressive (every 20 seconds)
+    setInterval(() => {
+        if (!youtubePlayer || !youtubePlayer.getCurrentTime || isSyncingVideo || syncLoopBreaker) return;
+        
+        // Only do lightweight sync verification
+        verifySync();
+    }, 20000);
 }
 
 // Verify if we need to sync but don't actively sync
@@ -1067,7 +1051,7 @@ function loadSpecificVideo(videoId, startTime = 0, autoplay = false) {
     // Update the input field
     videoIdInput.value = videoId;
     
-    // FIX: More robust video loading for better sync
+    // First cue the video (more reliable loading)
     youtubePlayer.cueVideoById({
         videoId: videoId,
         startSeconds: startTime
@@ -1075,7 +1059,7 @@ function loadSpecificVideo(videoId, startTime = 0, autoplay = false) {
     
     // Set play state after a short delay to ensure video loads properly
     setTimeout(() => {
-        // Always seek again to ensure exact position
+        // Make sure we're at the right position
         youtubePlayer.seekTo(startTime, true);
         
         if (autoplay) {
@@ -1136,7 +1120,7 @@ function performForcedSync(remoteState) {
         adjustedTime += secondsSinceUpdate;
     }
     
-    // FIX: Use cueVideoById first, then loadVideoById for more reliable loading
+    // Use cueVideoById first for more reliable loading
     youtubePlayer.cueVideoById({
         videoId: videoId,
         startSeconds: adjustedTime
@@ -1147,7 +1131,7 @@ function performForcedSync(remoteState) {
     
     // Set playback state after a delay to ensure video loads
     setTimeout(() => {
-        // Seek again to ensure correct position
+        // Make sure we're at the right position
         youtubePlayer.seekTo(adjustedTime, true);
         
         if (remoteState.isPlaying) {
@@ -1420,7 +1404,7 @@ function createPeerConnection(userData) {
     peers[peerId] = peer;
     userConnections[peerId] = userData;
     
-    // FIX: Create video container in advance
+    // Create video container in advance
     createPeerVideoContainer(peerId, userData.name);
     
     // Handle signals (WebRTC negotiation)
@@ -1479,7 +1463,7 @@ function createPeerConnection(userData) {
     });
 }
 
-// FIX: Separate function to create container for peer video
+// Create container for peer video
 function createPeerVideoContainer(peerId, peerName) {
     // Check if container already exists
     if (document.getElementById(`peer-${peerId}`)) return;
@@ -1557,7 +1541,7 @@ function createPeerVideoContainer(peerId, peerName) {
     return peerVideoContainer;
 }
 
-// FIX: Separate function to update peer stream
+// Update peer stream
 function updatePeerStream(peerId, peerName, stream) {
     // Get or create the container
     let peerVideoContainer = document.getElementById(`peer-${peerId}`);
@@ -1589,9 +1573,6 @@ function updatePeerStream(peerId, peerName, stream) {
                     if (loadingIndicator) {
                         loadingIndicator.style.display = 'none';
                     }
-                    
-                    // Mark this peer as initialized
-                    peerVideosInitialized[peerId] = true;
                 })
                 .catch(error => {
                     debugLog(`Error playing video for ${peerName}:`, error);
@@ -1607,9 +1588,6 @@ function updatePeerStream(peerId, peerName, stream) {
                             if (loadingIndicator) {
                                 loadingIndicator.style.display = 'none';
                             }
-                            
-                            // Mark this peer as initialized
-                            peerVideosInitialized[peerId] = true;
                         })
                         .catch(e => {
                             debugLog(`Still can't play video for ${peerName}:`, e);
@@ -1622,9 +1600,6 @@ function updatePeerStream(peerId, peerName, stream) {
             if (loadingIndicator) {
                 loadingIndicator.style.display = 'none';
             }
-            
-            // Mark this peer as initialized
-            peerVideosInitialized[peerId] = true;
         }
         
         // Update the state indicators
@@ -1674,17 +1649,62 @@ function updatePeerMediaState(userData) {
     }
 }
 
-function removePeerConnection(peerId) {
-    // Destroy and remove the peer connection
-    if (peers[peerId]) {
-        peers[peerId].destroy();
-        delete peers[peerId];
+// Handle offer signals better
+function handleOfferSignal(signal) {
+    const peerId = signal.from;
+    
+    // Get peer data from connections or fetch it
+    let peerData = userConnections[peerId];
+    
+    if (!peerData) {
+        // Try to fetch peer data from Firebase
+        db.ref(`rooms/${currentRoom}/connections/${peerId}`).once('value', snapshot => {
+            peerData = snapshot.val();
+            
+            if (peerData) {
+                userConnections[peerId] = peerData;
+                if (!peers[peerId]) {
+                    createPeerConnection(peerData);
+                }
+                peers[peerId].signal(signal.data);
+            } else {
+                debugLog(`Received offer from unknown peer: ${peerId}`);
+            }
+        });
+        return;
     }
     
-    // Remove from connections list
-    if (userConnections[peerId]) {
-        delete userConnections[peerId];
+    if (!peers[peerId]) {
+        // Create new peer connection if it doesn't exist yet
+        createPeerConnection(peerData);
     }
     
-    // Remove from initialized peers
+    // Apply the offer signal
+    debugLog(`Processing offer signal from peer ${peerId}`);
+    peers[peerId].signal(signal.data);
+}
+
+function handleAnswerSignal(signal) {
+    const peerId = signal.from;
     
+    if (!peers[peerId]) {
+        debugLog(`Received answer from unknown peer: ${peerId}`);
+        return;
+    }
+    
+    // Apply the answer signal
+    debugLog(`Processing answer signal from peer ${peerId}`);
+    peers[peerId].signal(signal.data);
+}
+
+function handleIceCandidateSignal(signal) {
+    const peerId = signal.from;
+    
+    if (!peers[peerId]) {
+        debugLog(`Received ICE candidate from unknown peer: ${peerId}`);
+        return;
+    }
+    
+    // Apply the ICE candidate signal
+    debugLog(`Processing ICE candidate from peer ${peerId}`);
+    peers[peerId].signal(signal.data);
