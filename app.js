@@ -36,11 +36,11 @@ let userCount = 1;
 let isSyncingVideo = false;
 let hasInitializedStream = false;
 
-// New sync control variables
+// New sync control variables with modified values for better performance
 let lastSyncTime = 0; // Track when we last performed a sync
 let ignoreNextStateChange = false; // Flag to ignore state changes caused by our own sync
-const SYNC_COOLDOWN = 5000; // Minimum time between syncs (5 seconds)
-const TIME_SYNC_THRESHOLD = 50; // Only sync if time difference is greater than this (seconds)
+const SYNC_COOLDOWN = 8000; // Minimum time between syncs (increased to 8 seconds)
+const TIME_SYNC_THRESHOLD = 3; // Only sync if time difference is greater than this (seconds) - reduced from 50 to 3
 
 // DOM Elements
 const splashScreen = document.getElementById('splashScreen');
@@ -635,6 +635,7 @@ function onPlayerReady(event) {
     setInterval(checkForSyncNeeded, 3000);
 }
 
+// IMPROVED: Enhanced sync check function to better handle synchronization issues
 function checkForSyncNeeded() {
     // Don't check if we're already syncing or if not enough time has passed
     const now = Date.now();
@@ -644,6 +645,11 @@ function checkForSyncNeeded() {
         db.ref(`rooms/${currentRoom}/videoState`).once('value', snapshot => {
             const remoteState = snapshot.val();
             if (!remoteState || !youtubePlayer || !youtubePlayer.getCurrentTime) return;
+            
+            // Don't sync if this update was from us
+            if (remoteState.updatedBy === currentUser.id && now - remoteState.lastUpdated < 10000) {
+                return;
+            }
             
             const localTime = youtubePlayer.getCurrentTime();
             const localIsPlaying = youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING;
@@ -658,12 +664,13 @@ function checkForSyncNeeded() {
                 syncReason = `Play state mismatch: Remote=${remoteState.isPlaying}, Local=${localIsPlaying}`;
             }
             
-            // Only sync time if difference is significant (prevents minor fluctuations)
+            // Only sync time if difference is significant
             else if (timeDiff > TIME_SYNC_THRESHOLD) {
-                // Special case: if we're near the end of the video and remote is at beginning,
-                // this might be a loop rather than a need to sync
                 const duration = youtubePlayer.getDuration();
-                if (!(localTime > duration - 10 && remoteState.currentTime < 3)) {
+                
+                // Prevent sync loops by checking if we're in a reasonable playback position
+                if (localTime > 0 && localTime < duration && 
+                    remoteState.currentTime > 0 && remoteState.currentTime < duration) {
                     needsSync = true;
                     syncReason = `Time difference: ${timeDiff.toFixed(2)}s (Local: ${localTime.toFixed(2)}, Remote: ${remoteState.currentTime.toFixed(2)})`;
                 }
@@ -679,6 +686,7 @@ function checkForSyncNeeded() {
     }
 }
 
+// IMPROVED: Enhanced sync function to prevent race conditions and cascading updates
 function performSync(remoteState) {
     lastSyncTime = Date.now();
     isSyncingVideo = true;
@@ -697,11 +705,15 @@ function performSync(remoteState) {
         youtubePlayer.pauseVideo();
     }
     
-    // Reset sync flags after a delay
+    // Reset sync flags after a longer delay to ensure state changes have completed
     setTimeout(() => {
         isSyncingVideo = false;
+    }, 1500);
+    
+    // Reset ignoreNextStateChange after even longer to catch any delayed events
+    setTimeout(() => {
         ignoreNextStateChange = false;
-    }, 1000);
+    }, 2000);
 }
 
 function onPlayerStateChange(event) {
@@ -801,7 +813,7 @@ function loadVideo() {
     setTimeout(() => {
         isSyncingVideo = false;
         ignoreNextStateChange = false;
-    }, 1000);
+    }, 2000); // Extended from 1000 to 2000ms to allow for YouTube API delays
 }
 
 function playVideo() {
@@ -837,7 +849,7 @@ function handleSeek() {
     // Wait a bit to update Firebase to make sure the seekTo has completed
     setTimeout(() => {
         updateVideoState(youtubePlayer.getPlayerState() === YT.PlayerState.PLAYING, newTime);
-    }, 200);
+    }, 300); // Increased from 200 to 300ms for better stability
 }
 
 function updateSeekBar() {
@@ -881,7 +893,7 @@ function updateVideoState(isPlaying, currentTime) {
     // Reset the sync flag after a delay
     setTimeout(() => {
         isSyncingVideo = false;
-    }, 1000);
+    }, 1500); // Increased from 1000 to 1500ms for better stability
 }
 
 // Force sync button implementation
