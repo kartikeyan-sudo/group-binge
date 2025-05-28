@@ -80,11 +80,27 @@ const localUserName = document.getElementById('localUserName');
 
 // ----- Event Listeners -----
 document.addEventListener('DOMContentLoaded', () => {
-    debugLog('DOM content loaded');
+    console.log('DOM content loaded');
     
     // Login/Room creation
-    createRoomBtn.addEventListener('click', createRoom);
-    joinRoomBtn.addEventListener('click', joinRoom);
+    if (createRoomBtn) {
+        createRoomBtn.addEventListener('click', function() {
+            console.log('Create room button clicked');
+            createRoom();
+        });
+    } else {
+        console.error('Create room button not found!');
+    }
+    
+    if (joinRoomBtn) {
+        joinRoomBtn.addEventListener('click', function() {
+            console.log('Join room button clicked');
+            joinRoom();
+        });
+    } else {
+        console.error('Join room button not found!');
+    }
+    
     nameInput.addEventListener('input', validateInputs);
     roomInput.addEventListener('input', validateInputs);
     
@@ -108,8 +124,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial validation
     validateInputs();
-    
-    debugLog('All event listeners set up');
 });
 
 // ----- Utility Functions -----
@@ -175,11 +189,11 @@ function showNotification(message, type = 'info', duration = 3000) {
 
 // ----- Room Management -----
 function createRoom() {
-    debugLog('Create room button clicked');
-    
+    console.log('Create room button clicked'); // Debug logging
+  
     const name = nameInput.value.trim();
     if (!name) {
-        showNotification('Please enter a name', 'error');
+        alert('Please enter your name first');
         return;
     }
     
@@ -188,19 +202,74 @@ function createRoom() {
     localUserName.innerText = name;
     roomHostId = currentUser.id; // Set creator as host
     
-    debugLog(`Creating room: ${currentRoom} as ${name}`);
-    showNotification('Creating room...', 'info');
+    console.log(`Creating room with ID: ${currentRoom}`);
     
-    initializeRoom(true);
+    // Direct approach to set up the room in Firebase
+    const roomRef = db.ref(`rooms/${currentRoom}`);
+    roomRef.set({
+        createdAt: firebase.database.ServerValue.TIMESTAMP,
+        createdBy: currentUser.id,
+        hostId: currentUser.id,
+        activeUsers: { [currentUser.id]: currentUser.name },
+        videoState: {
+            videoId: '',
+            isPlaying: false,
+            currentTime: 0,
+            timestamp: firebase.database.ServerValue.TIMESTAMP,
+            updatedBy: currentUser.id
+        }
+    })
+    .then(() => {
+        console.log('Room created successfully in Firebase');
+        // Directly show transition to room UI without async operations
+        splashScreen.classList.add('hidden');
+        mainApp.classList.remove('hidden');
+        roomIdDisplay.textContent = currentRoom;
+        
+        // Initialize media after UI transition
+        initializeUserMedia()
+            .then(() => {
+                // Continue with room setup
+                setupFirebaseListeners();
+                setTimeout(() => {
+                    initializeYouTubePlayer();
+                }, 1000);
+                
+                // Add user to the room
+                db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`).set(currentUser.name);
+                db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`).onDisconnect().remove();
+                
+                // Add user data to presence system
+                db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`).set({
+                    id: currentUser.id,
+                    name: currentUser.name,
+                    timestamp: firebase.database.ServerValue.TIMESTAMP,
+                    isAudioEnabled: currentUser.isAudioEnabled,
+                    isVideoEnabled: currentUser.isVideoEnabled
+                });
+                db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`).onDisconnect().remove();
+                
+                // Set up UI elements
+                setupRoomUI();
+            })
+            .catch(error => {
+                handleMediaError(error);
+            });
+    })
+    .catch(error => {
+        console.error('Error creating room:', error);
+        alert('Failed to create room. Please try again.');
+    });
 }
 
+// This function is called when the "Join Room" button is clicked
 function joinRoom() {
-    debugLog('Join room button clicked');
+    console.log('Join room button clicked'); // Debug logging
     
     const name = nameInput.value.trim();
     const roomId = roomInput.value.trim();
     if (!name || !roomId) {
-        showNotification('Please enter name and room ID', 'error');
+        alert('Please enter both your name and the room ID');
         return;
     }
     
@@ -208,197 +277,130 @@ function joinRoom() {
     currentRoom = roomId;
     localUserName.innerText = name;
     
-    debugLog(`Joining room: ${roomId} as ${name}`);
-    showNotification('Joining room...', 'info');
+    console.log(`Joining room: ${roomId}`);
     
-    initializeRoom(false);
-}
-
-function initializeRoom(isCreator) {
-    // Set up the room in Firebase
-    const roomRef = db.ref(`rooms/${currentRoom}`);
-    
-    if (isCreator) {
-        debugLog('Setting up new room in Firebase');
-        
-        // Create room with initial state
-        roomRef.set({
-            createdAt: firebase.database.ServerValue.TIMESTAMP,
-            createdBy: currentUser.id,
-            hostId: currentUser.id, // Track room host
-            activeUsers: { [currentUser.id]: currentUser.name },
-            videoState: {
-                videoId: '',
-                isPlaying: false,
-                currentTime: 0,
-                timestamp: firebase.database.ServerValue.TIMESTAMP,
-                updatedBy: currentUser.id
+    // Check if room exists
+    db.ref(`rooms/${currentRoom}`).once('value')
+        .then(snapshot => {
+            if (!snapshot.exists()) {
+                alert('Room not found. Please check the Room ID and try again.');
+                return;
             }
-        }).then(() => {
-            debugLog('Room created successfully in Firebase');
-            enterRoom();
-        }).catch(error => {
-            debugLog('Error creating room:', error);
-            showNotification('Error creating room: ' + error.message, 'error');
-        });
-    } else {
-        debugLog('Checking if room exists');
-        
-        // Check if room exists
-        roomRef.once('value', snapshot => {
-            if (snapshot.exists()) {
-                debugLog('Room found, getting host ID');
-                // Get the host ID when joining
-                if (snapshot.val().hostId) {
-                    roomHostId = snapshot.val().hostId;
-                    debugLog(`Host ID: ${roomHostId}`);
-                }
-                enterRoom();
-            } else {
-                debugLog('Room not found');
-                showNotification('Room not found. Check the Room ID and try again.', 'error');
-            }
-        }).catch(error => {
-            debugLog('Error checking room:', error);
-            showNotification('Error connecting to room: ' + error.message, 'error');
-        });
-    }
-}
-
-function enterRoom() {
-    debugLog('Entering room, initializing media');
-    
-    // Initialize user media (camera/mic)
-    initializeUserMedia()
-        .then(() => {
-            debugLog('Media initialized successfully');
             
-            // Show main app, hide splash screen
+            // Get host ID
+            if (snapshot.val().hostId) {
+                roomHostId = snapshot.val().hostId;
+            }
+            
+            // Directly show transition to room UI without async operations
             splashScreen.classList.add('hidden');
             mainApp.classList.remove('hidden');
             roomIdDisplay.textContent = currentRoom;
             
-            // Set up Firebase listeners
-            setupFirebaseListeners();
-            
-            // Wait a bit before initializing YouTube player to ensure DOM is ready
-            setTimeout(() => {
-                initializeYouTubePlayer();
-            }, 1000);
-            
-            // Announce user joined
-            const userRef = db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`);
-            userRef.set(currentUser.name);
-            userRef.onDisconnect().remove();
-            
-            // Add user data to presence system
-            const connectionRef = db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`);
-            connectionRef.set({
-                id: currentUser.id,
-                name: currentUser.name,
-                timestamp: firebase.database.ServerValue.TIMESTAMP,
-                isAudioEnabled: currentUser.isAudioEnabled,
-                isVideoEnabled: currentUser.isVideoEnabled
-            });
-            connectionRef.onDisconnect().remove();
-            
-            // Add sync button to the interface
-            const videoControls = document.querySelector('.video-controls');
-            if (videoControls && !document.getElementById('syncBtn')) {
-                const syncBtn = document.createElement('button');
-                syncBtn.id = 'syncBtn';
-                syncBtn.innerHTML = '<i class="fas fa-sync"></i> Force Sync';
-                syncBtn.addEventListener('click', forceSyncWithRemote);
-                videoControls.appendChild(syncBtn);
-            }
-            
-            // If we're host, add a "Sync All" button
-            if (currentUser.id === roomHostId && videoControls && !document.getElementById('syncAllBtn')) {
-                const syncAllBtn = document.createElement('button');
-                syncAllBtn.id = 'syncAllBtn';
-                syncAllBtn.innerHTML = '<i class="fas fa-broadcast-tower"></i> Sync Everyone';
-                syncAllBtn.style.backgroundColor = '#f0b323'; // Gold color for host button
-                syncAllBtn.addEventListener('click', syncEveryone);
-                videoControls.appendChild(syncAllBtn);
-            }
-            
-            // Request a sync from the host after a short delay (for new joiners)
-            if (currentUser.id !== roomHostId) {
-                setTimeout(() => {
-                    db.ref(`rooms/${currentRoom}/syncCommand`).set({
-                        type: 'requestSync',
-                        from: currentUser.id,
-                        timestamp: Date.now()
-                    });
+            // Initialize media after UI transition
+            initializeUserMedia()
+                .then(() => {
+                    // Continue with room setup
+                    setupFirebaseListeners();
+                    setTimeout(() => {
+                        initializeYouTubePlayer();
+                    }, 1000);
                     
-                    // Also trigger a forced sync in case the host doesn't respond
-                    forceSyncWithRemote();
-                }, 2000);
-            }
-            
-            showNotification('Successfully joined the room!', 'success');
+                    // Add user to the room
+                    db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`).set(currentUser.name);
+                    db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`).onDisconnect().remove();
+                    
+                    // Add user data to presence system
+                    db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`).set({
+                        id: currentUser.id,
+                        name: currentUser.name,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP,
+                        isAudioEnabled: currentUser.isAudioEnabled,
+                        isVideoEnabled: currentUser.isVideoEnabled
+                    });
+                    db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`).onDisconnect().remove();
+                    
+                    // Set up UI elements
+                    setupRoomUI();
+                    
+                    // Request sync for newly joining user
+                    setTimeout(() => {
+                        forceSyncWithRemote();
+                    }, 2000);
+                })
+                .catch(error => {
+                    handleMediaError(error);
+                });
         })
         .catch(error => {
-            debugLog('Error accessing camera/microphone:', error);
-            showNotification('Error accessing camera/microphone: ' + error.message, 'error');
-            
-            // Allow joining without camera/mic
-            if (confirm('Failed to access camera/microphone. Would you like to join without video/audio?')) {
-                debugLog('User chose to join without media');
-                
-                // Create an empty stream as a fallback
-                localStream = new MediaStream();
-                
-                // Show main app, hide splash screen
-                splashScreen.classList.add('hidden');
-                mainApp.classList.remove('hidden');
-                roomIdDisplay.textContent = currentRoom;
-                
-                // Set up Firebase listeners
-                setupFirebaseListeners();
-                
-                setTimeout(() => {
-                    initializeYouTubePlayer();
-                }, 1000);
-                
-                // Set initial states
-                currentUser.isAudioEnabled = false;
-                currentUser.isVideoEnabled = false;
-                hasInitializedStream = true;
-                
-                // Update UI to show muted state
-                toggleAudioBtn.innerHTML = '<i class="fas fa-microphone-slash"></i>';
-                toggleVideoBtn.innerHTML = '<i class="fas fa-video-slash"></i>';
-                toggleAudioBtn.classList.add('muted');
-                toggleVideoBtn.classList.add('muted');
-                
-                // Add user to the room
-                const userRef = db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`);
-                userRef.set(currentUser.name);
-                userRef.onDisconnect().remove();
-                
-                const connectionRef = db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`);
-                connectionRef.set({
-                    id: currentUser.id,
-                    name: currentUser.name,
-                    timestamp: firebase.database.ServerValue.TIMESTAMP,
-                    isAudioEnabled: false,
-                    isVideoEnabled: false
-                });
-                connectionRef.onDisconnect().remove();
-                
-                // Request sync for newly joining user
-                setTimeout(() => {
-                    forceSyncWithRemote();
-                }, 2000);
-                
-                showNotification('Joined without camera/microphone', 'info');
-            } else {
-                // User declined to join without media, stay on splash screen
-                debugLog('User declined to join without media');
-                showNotification('Room join canceled', 'info');
-            }
+            console.error('Error checking room:', error);
+            alert('Failed to join room. Please try again.');
         });
+}
+
+// Helper functions for room creation/joining
+function setupRoomUI() {
+    // Add sync button to the interface
+    const videoControls = document.querySelector('.video-controls');
+    if (videoControls && !document.getElementById('syncBtn')) {
+        const syncBtn = document.createElement('button');
+        syncBtn.id = 'syncBtn';
+        syncBtn.innerHTML = '<i class="fas fa-sync"></i> Force Sync';
+        syncBtn.addEventListener('click', forceSyncWithRemote);
+        videoControls.appendChild(syncBtn);
+    }
+    
+    // If we're host, add a "Sync All" button
+    if (currentUser.id === roomHostId && videoControls && !document.getElementById('syncAllBtn')) {
+        const syncAllBtn = document.createElement('button');
+        syncAllBtn.id = 'syncAllBtn';
+        syncAllBtn.innerHTML = '<i class="fas fa-broadcast-tower"></i> Sync Everyone';
+        syncAllBtn.style.backgroundColor = '#f0b323'; // Gold color for host button
+        syncAllBtn.addEventListener('click', syncEveryone);
+        videoControls.appendChild(syncAllBtn);
+    }
+    
+    showNotification('Successfully joined the room!', 'success');
+}
+
+function handleMediaError(error) {
+    console.error('Media error:', error);
+    
+    if (confirm('Failed to access camera/microphone. Would you like to join without video/audio?')) {
+        // Create an empty stream as a fallback
+        localStream = new MediaStream();
+        hasInitializedStream = true;
+        
+        // Set initial states
+        currentUser.isAudioEnabled = false;
+        currentUser.isVideoEnabled = false;
+        
+        // Update UI to show muted state
+        toggleAudioBtn.innerHTML = '<i class="fas fa-microphone-slash"></i>';
+        toggleVideoBtn.innerHTML = '<i class="fas fa-video-slash"></i>';
+        toggleAudioBtn.classList.add('muted');
+        toggleVideoBtn.classList.add('muted');
+        
+        // Continue with room setup
+        setupFirebaseListeners();
+        setTimeout(initializeYouTubePlayer, 1000);
+        
+        // Add user data
+        db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`).set(currentUser.name);
+        db.ref(`rooms/${currentRoom}/activeUsers/${currentUser.id}`).onDisconnect().remove();
+        
+        db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`).set({
+            id: currentUser.id,
+            name: currentUser.name,
+            timestamp: firebase.database.ServerValue.TIMESTAMP,
+            isAudioEnabled: false,
+            isVideoEnabled: false
+        });
+        db.ref(`rooms/${currentRoom}/connections/${currentUser.id}`).onDisconnect().remove();
+        
+        // Set up UI elements
+        setupRoomUI();
+    }
 }
 
 function setupFirebaseListeners() {
@@ -807,7 +809,7 @@ function onPlayerReady(event) {
             // Set flag to prevent update loops
             isSyncingVideo = true;
             
-            // Load the existing video
+            // Load the existing video - use cueVideoById for more reliable loading
             youtubePlayer.cueVideoById({
                 videoId: videoState.videoId,
                 startSeconds: adjustedTime
@@ -1697,4 +1699,158 @@ function updatePeerMediaState(userData) {
         let overlay = peerVideoContainer.querySelector('.video-overlay');
         if (!overlay) return;
         
+        let audioIcon = overlay.querySelector('.audio-state');
+        let videoIcon = overlay.querySelector('.video-state');
         
+        // Create icons if they don't exist
+        if (!audioIcon) {
+            audioIcon = document.createElement('div');
+            audioIcon.className = 'audio-state';
+            overlay.appendChild(audioIcon);
+        }
+        
+        if (!videoIcon) {
+            videoIcon = document.createElement('div');
+            videoIcon.className = 'video-state';
+            overlay.appendChild(videoIcon);
+        }
+        
+        // Update icons based on state
+        audioIcon.innerHTML = userData.isAudioEnabled ? 
+            '<i class="fas fa-microphone"></i>' : 
+            '<i class="fas fa-microphone-slash"></i>';
+        
+        videoIcon.innerHTML = userData.isVideoEnabled ? 
+            '<i class="fas fa-video"></i>' : 
+            '<i class="fas fa-video-slash"></i>';
+        
+        // Add muted class if needed
+        audioIcon.classList.toggle('muted', !userData.isAudioEnabled);
+        videoIcon.classList.toggle('muted', !userData.isVideoEnabled);
+    }
+}
+
+function removePeerConnection(peerId) {
+    // Destroy and remove the peer connection
+    if (peers[peerId]) {
+        peers[peerId].destroy();
+        delete peers[peerId];
+    }
+    
+    // Remove from connections list
+    if (userConnections[peerId]) {
+        delete userConnections[peerId];
+    }
+    
+    // Remove from initialized peers
+    if (peerVideosInitialized[peerId]) {
+        delete peerVideosInitialized[peerId];
+    }
+    
+    // Remove video element
+    const peerVideoContainer = document.getElementById(`peer-${peerId}`);
+    if (peerVideoContainer && peerVideoContainer.parentNode) {
+        peerVideoContainer.parentNode.removeChild(peerVideoContainer);
+    }
+    
+    debugLog(`Removed peer: ${peerId}`);
+}
+
+// WebRTC signal handling functions
+function handleOfferSignal(signal) {
+    const peerId = signal.from;
+    
+    // Get peer data from connections or fetch it
+    let peerData = userConnections[peerId];
+    
+    if (!peerData) {
+        // Try to fetch peer data from Firebase
+        db.ref(`rooms/${currentRoom}/connections/${peerId}`).once('value', snapshot => {
+            peerData = snapshot.val();
+            
+            if (peerData) {
+                userConnections[peerId] = peerData;
+                if (!peers[peerId]) {
+                    createPeerConnection(peerData);
+                }
+                
+                if (peers[peerId]) {
+                    peers[peerId].signal(signal.data);
+                }
+            } else {
+                debugLog(`Received offer from unknown peer: ${peerId}`);
+            }
+        });
+        return;
+    }
+    
+    if (!peers[peerId]) {
+        // Create new peer connection if it doesn't exist yet
+        createPeerConnection(peerData);
+    }
+    
+    // Apply the offer signal
+    debugLog(`Processing offer signal from peer ${peerId}`);
+    if (peers[peerId]) {
+        peers[peerId].signal(signal.data);
+    }
+}
+
+function handleAnswerSignal(signal) {
+    const peerId = signal.from;
+    
+    if (!peers[peerId]) {
+        debugLog(`Received answer from unknown peer: ${peerId}`);
+        return;
+    }
+    
+    // Apply the answer signal
+    debugLog(`Processing answer signal from peer ${peerId}`);
+    peers[peerId].signal(signal.data);
+}
+
+function handleIceCandidateSignal(signal) {
+    const peerId = signal.from;
+    
+    if (!peers[peerId]) {
+        debugLog(`Received ICE candidate from unknown peer: ${peerId}`);
+        return;
+    }
+    
+    // Apply the ICE candidate signal
+    debugLog(`Processing ICE candidate from peer ${peerId}`);
+    peers[peerId].signal(signal.data);
+}
+
+// Add styles for spinner animation to the document
+document.head.insertAdjacentHTML('beforeend', `
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+.spinner {
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    border-top: 3px solid var(--accent-color);
+    width: 30px;
+    height: 30px;
+    animation: spin 1s linear infinite;
+}
+</style>
+`);
+
+// Log user information for debugging
+debugLog(`App initialized for user: ${currentUser.id}`);
+debugLog(`Current date/time: ${new Date().toISOString()}`);
+
+// If running on https, check for service worker support
+if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/sw.js').then(function(registration) {
+            debugLog('ServiceWorker registration successful');
+        }, function(err) {
+            debugLog('ServiceWorker registration failed: ', err);
+        });
+    });
+}
