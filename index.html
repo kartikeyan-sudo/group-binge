@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mr. Zero's Binge Server</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <!-- Socket.IO for real-time communication -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <!-- YouTube iFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <!-- Simple Peer for WebRTC -->
+    <script src="https://unpkg.com/simple-peer@9.11.0/simplepeer.min.js"></script>
+</head>
+<body>
+    <!-- Splash Screen / Login -->
+    <div id="splashScreen" class="splash-screen">
+        <div class="avengers-logo">
+            <img src="https://www.pngall.com/wp-content/uploads/4/Website-PNG-Free-Image.png" alt="Avengers Logo">
+        </div>
+        <h1>Mr. Zero's Binge Server</h1>
+        <div class="login-container">
+            <input type="text" id="nameInput" placeholder="Enter your codename..." maxlength="15">
+            <div class="room-controls">
+                <input type="text" id="roomInput" placeholder="Enter room ID...">
+                <button id="createRoomBtn" class="glow-button">Create Room</button>
+                <button id="joinRoomBtn" class="glow-button">Join Room</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App -->
+    <div id="mainApp" class="hidden">
+        <!-- Header with Room Info -->
+        <header>
+            <div class="room-info">
+                <div class="room-id">
+                    <span>ROOM ID: </span>
+                    <span id="roomIdDisplay"></span>
+                    <button id="copyRoomId" title="Copy Room ID">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <div class="user-count">
+                    <i class="fas fa-users"></i>
+                    <span id="userCountDisplay">1</span>
+                </div>
+            </div>
+            <div class="room-actions">
+                <button id="leaveRoomBtn"><i class="fas fa-sign-out-alt"></i> Exit</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- YouTube Player Section -->
+            <div class="youtube-section">
+                <div id="youtubePlayer"></div>
+                <div class="video-controls">
+                    <input type="text" id="videoIdInput" placeholder="Enter YouTube Video ID or URL...">
+                    <button id="loadVideoBtn">Load Video</button>
+                    <div class="playback-controls">
+                        <button id="playBtn"><i class="fas fa-play"></i></button>
+                        <button id="pauseBtn"><i class="fas fa-pause"></i></button>
+                        <input type="range" id="seekBar" min="0" max="100" value="0">
+                        <span id="currentTime">0:00</span> / <span id="totalTime">0:00</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel (Peers & Chat) -->
+            <div class="right-panel">
+                <!-- Peer Video Section -->
+                <div class="peers-section">
+                    <h3><i class="fas fa-users"></i> AVENGERS TEAM</h3>
+                    <div class="video-grid" id="peersContainer">
+                        <div class="video-container local-video-container">
+                            <video id="localVideo" autoplay muted playsinline></video>
+                            <div class="video-overlay">
+                                <span class="user-name" id="localUserName">You</span>
+                                <div class="video-controls">
+                                    <button id="toggleAudioBtn" class="control-btn"><i class="fas fa-microphone"></i></button>
+                                    <button id="toggleVideoBtn" class="control-btn"><i class="fas fa-video"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Peer videos will be added here dynamically -->
+                    </div>
+                </div>
+
+                <!-- Chat Section -->
+                <div class="chat-section">
+                    <h3><i class="fas fa-comment-alt"></i> TEAM COMMS</h3>
+                    <div class="chat-messages" id="chatMessages">
+                        <!-- Messages will be added here dynamically -->
+                        <div class="welcome-message">
+                            <p>Welcome to the Avengers Watch Party! Share the Room ID to invite teammates.</p>
+                        </div>
+                    </div>
+                    <div class="chat-input">
+                        <input type="text" id="messageInput" placeholder="Type your message...">
+                        <button id="sendMessageBtn"><i class="fas fa-paper-plane"></i></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Iron Man HUD Overlay Effects -->
+    <div class="hud-overlay">
+        <div class="hud-corner top-left"></div>
+        <div class="hud-corner top-right"></div>
+        <div class="hud-corner bottom-left"></div>
+        <div class="hud-corner bottom-right"></div>
+    </div>
+    
+    <!-- Notifications -->
+    <div id="notificationContainer"></div>
+
+    <!-- Developer Watermark -->
+    <div class="developer-watermark">
+        <i class="fas fa-code"></i>
+        <span>Developed by <strong>Kartikeyan Dubey</strong></span>
+    </div>
+
+        <!-- Scripts -->
+        <!--
+            Backend override: set window.BINGE_BACKEND to point to your API/socket server.
+            Useful when the static site is hosted separately (e.g., Netlify) but the API
+            runs on another host (e.g., localhost:4001). You can change or remove this
+            line in production when your API is co-hosted.
+        -->
+        <script>
+            // Development default: point to local backend. Change to your deployed API as needed.
+            if (!window.BINGE_BACKEND) {
+                window.BINGE_BACKEND = 'http://localhost:4001';
+            }
+            // Optional: you can also set window.BINGE_DEBUG = false in production
+        </script>
+
+        <script src="config/client-config.js"></script>
+        <script src="app-new.js"></script>
+</body>
+</html>
