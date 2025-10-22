@@ -128,21 +128,24 @@
     </div>
 
         <!-- Scripts -->
-        <!--
-            Backend override: set window.BINGE_BACKEND to point to your API/socket server.
-            Useful when the static site is hosted separately (e.g., Netlify) but the API
-            runs on another host (e.g., localhost:4001). You can change or remove this
-            line in production when your API is co-hosted.
-        -->
-        <script>
-            // Development default: point to local backend. Change to your deployed API as needed.
-            if (!window.BINGE_BACKEND) {
-                window.BINGE_BACKEND = 'http://localhost:4001';
-            }
-            // Optional: you can also set window.BINGE_DEBUG = false in production
-        </script>
+    <!--
+      Backend override: set window.BINGE_BACKEND to point to your API/socket server.
+      Useful when the static site is hosted separately (e.g., Netlify) but the API
+      runs on another host (e.g., localhost:4001 for local dev, or your deployed backend URL).
+    -->
+    <script>
+      // Only set localhost backend when running locally
+      if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        window.BINGE_BACKEND = 'http://localhost:4001';
+      } else {
+        // Production backend URL (Railway deployment)
+        window.BINGE_BACKEND = 'https://group-binge-production.up.railway.app';
+      }
+      // Optional: disable debug in production
+      window.BINGE_DEBUG = window.location.hostname === 'localhost';
+    </script>
 
-        <script src="config/client-config.js"></script>
-        <script src="app-new.js"></script>
+    <script src="config/client-config.js"></script>
+    <script src="app-new.js"></script>
 </body>
 </html>
